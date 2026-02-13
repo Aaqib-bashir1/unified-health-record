@@ -57,6 +57,24 @@ Create a **patient-owned digital medical timeline** that preserves complete heal
 - Controls sharing and consent
 - Can revoke access at any time
 
+### Caregiver & Dependent Support
+
+UHR separates **User Accounts** from **Patient Profiles**.
+
+- A Patient Profile represents a single medical identity.
+- A User Account may:
+  - Own a Patient Profile (self)
+  - Be granted caregiver access to another Patient Profile
+
+Caregiver access must:
+
+- Be explicitly granted
+- Be scope-bound
+- Be revocable
+- Appear in audit logs
+
+Consent rules apply at the **Patient Profile** level, not the User Account level.
+
 ### Doctor
 
 Doctors interact with the system in two modes:
@@ -104,6 +122,14 @@ Doctors interact with the system in two modes:
 
 ## 6. High-Level System Flow
 
+- Patient creates and maintains a Unified Health Record.
+- Medical data is structured into immutable Medical Events.
+- Events are ordered chronologically by clinical timestamp.
+- Patient grants consent-based access to doctors.
+- Doctors review timeline and may add attributed contributions.
+- All access and modifications generate immutable audit entries.
+- Patient retains control and may revoke access at any time.
+
 ---
 
 ## 7. Consent Model (Operational Rules)
@@ -119,6 +145,7 @@ Consent is **explicit, time-bound, and scope-bound**.
 ### Consent revocation:
 
 - Takes effect immediately
+
 - Does not erase audit history
 
 - Emergency override access is **explicitly not supported** in the MVP
@@ -199,6 +226,24 @@ This separation ensures:
 - Historical data is never overwritten
 
 Health Stats and summary views compute from events; the **full event history is always preserved**.
+
+### Medication Lifecycle Rule
+
+Medications are modeled as **time-bound Medical Events**.
+
+A medication lifecycle is represented through multiple immutable events:
+
+- **Medication Started** — creates the initial medication event.
+- **Medication Modified** — creates a new amendment event referencing the original.
+- **Medication Discontinued** — creates a new event referencing the original medication event.
+
+Existing medication events are never overwritten.
+
+This ensures:
+
+- Accurate longitudinal medication history
+- Clear determination of active vs historical medications
+- Medico-legal traceability
 
 ---
 
@@ -284,10 +329,23 @@ Every Medical Event stores two distinct timestamps:
 ### Trust & Verification Signals
 
 - Source type _(lab / doctor / patient)_
-- Verification status _(verified / unverified)_
+- Verification status _(see levels below)_
 - Supporting evidence _(PDF / image / none)_
 
 Conflicting events coexist. Doctors apply clinical judgment using these signals.
+
+### Verification Levels
+
+Verification status must clearly distinguish:
+
+- **Self-Reported** — manually entered by patient
+- **Patient-Confirmed** — OCR-extracted and confirmed by patient
+- **Provider-Verified** — confirmed by a registered doctor
+- **Digitally Verified** — received via structured digital integration (e.g., lab system)
+
+Verification level must be clearly visible in all doctor views.
+
+No verification level implies clinical accuracy.
 
 ---
 
@@ -320,12 +378,17 @@ Conflicting events coexist. Doctors apply clinical judgment using these signals.
 **Document Ingestion Pipeline (Mandatory Rules):**
 
 - Original source file _(PDF/Image)_ always preserved
+
 - Extracted data points link back to source
+
 - Doctors can view source documents
+
 - OCR used only for structuring, never diagnosis
+
 - Human confirmation before timeline insertion
 
 - CRUD APIs for Medical Events
+
 - Timeline API
 
 ### Phase 4 — Doctor Access & Second Opinions (Weeks 7–8)
@@ -361,3 +424,48 @@ Conflicting events coexist. Doctors apply clinical judgment using these signals.
 **Unified Health Record (UHR)** is a patient-owned medical timeline ensuring no medical decision is made based on incomplete history.
 
 The system prioritizes **continuity, consent, and clarity** over automation or prediction.
+
+---
+
+## 18. Interoperability & Standards Alignment
+
+Interoperability supports **data portability and external system integration**, not internal domain control.
+
+### Standards Position
+
+- UHR is designed to allow alignment with modern healthcare interoperability standards.
+- **HL7 FHIR (R4)** is the primary reference standard.
+- Full FHIR conformance is **not required** in the MVP.
+- The internal **Medical Event** model remains the canonical domain structure.
+
+### Mapping Requirement
+
+Every Medical Event type must be mappable to an equivalent FHIR resource, including:
+
+- Patient → `Patient`
+- Visit → `Encounter`
+- Diagnosis → `Condition`
+- Test Result → `Observation`
+- Medication → `MedicationRequest`
+- Procedure → `Procedure`
+- Document → `DocumentReference`
+- Second Opinion → `Communication` or `Observation`
+
+Mapping must preserve:
+
+- **Clinical timestamp**
+- **Source attribution**
+- **Audit traceability**
+- **Visibility and consent rules**
+
+### Integration Layer Responsibility
+
+External integration layers may handle:
+
+- FHIR import
+- FHIR export
+- National health gateway integration
+- EHR interoperability
+- Structured terminology support _(e.g., SNOMED, LOINC)_
+
+The core UHR model must not introduce structural decisions that prevent future standards alignment.
