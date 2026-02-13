@@ -2,8 +2,8 @@
 
 Thank you for your interest in contributing to **Unified Health Record (UHR)**.
 
-UHR is **healthcare infrastructure**, not a general-purpose app.  
-Contributions are welcome, but they must respect the project’s **ethical, clinical, and architectural boundaries**.
+UHR is healthcare infrastructure, not a general-purpose application.  
+Contributions are welcome, but they must respect the project’s ethical, clinical, and architectural boundaries.
 
 ---
 
@@ -16,12 +16,13 @@ Before contributing, please understand the core principles of UHR:
 - **Consent is explicit, revocable, and scoped**
 - **Transparency over automation**
 - **Clarity over prediction**
+- **Correctness over speed**
 
 If a contribution conflicts with these principles, it will not be accepted.
 
 ---
 
-## Scope Boundaries (Very Important)
+## Scope Boundaries (Non-Negotiable)
 
 ### UHR Accepts Contributions That:
 
@@ -29,18 +30,18 @@ If a contribution conflicts with these principles, it will not be accepted.
 - Strengthen consent, privacy, or auditability
 - Improve ingestion of real-world medical documents
 - Improve developer experience or documentation
-- Improve performance or reliability **without altering semantics**
+- Improve performance or reliability **without altering medical semantics**
 
 ### UHR Does NOT Accept Contributions That:
 
 - Add AI diagnosis or treatment recommendations
 - Automate clinical decision-making
 - Introduce surveillance, tracking, or behavioral analytics
-- Add billing, insurance, or hospital inventory features
+- Add billing, insurance, or hospital ERP features
 - Override or mutate historical medical data
 - Remove or weaken consent or audit mechanisms
 
-These boundaries are **non-negotiable**.
+These boundaries exist to preserve clinical safety and trust.
 
 ---
 
@@ -48,9 +49,12 @@ These boundaries are **non-negotiable**.
 
 ### 1. Issues First
 
-- All non-trivial changes **must be discussed in an issue first**
-- Feature PRs without an associated issue may be closed
-- This prevents scope creep and misalignment
+All non-trivial changes **must be discussed in a GitHub issue first**.
+
+- Feature pull requests without prior discussion may be closed.
+- This prevents scope creep and architectural drift.
+
+---
 
 ### 2. Pull Requests
 
@@ -59,52 +63,62 @@ Pull requests must:
 - Be focused and minimal
 - Reference a related issue
 - Preserve backward compatibility unless explicitly discussed
-- Include rationale for any data model changes
+- Include clear rationale for any data model changes
 - Avoid mixing unrelated changes
 
 Maintainers may request changes or close PRs that conflict with project goals.
 
 ---
 
-## Data Model Changes (Special Rules)
+## Data Model Changes (Strict Rules)
 
 Because UHR handles medical data:
 
 - Data must be **append-only**
 - Existing medical events must never be overwritten or deleted
-- Corrections must be modeled as **amendments**
+- Corrections must be modeled as amendments
 - Timeline semantics must be preserved
 - Dual timestamps (clinical vs system) must remain intact
+- Audit trails must never be bypassed
 
-Any PR violating these rules will be rejected.
+Any pull request violating these rules will be rejected.
 
 ---
 
 ## Security & Privacy
 
-- Do **not** report security vulnerabilities via public issues
-- Follow the instructions in `SECURITY.md`
+- Do **not** report security vulnerabilities via public issues.
+- Follow the instructions in `SECURITY.md`.
 - Never include real patient data in:
   - Issues
   - Pull requests
   - Test fixtures
-  - Logs or screenshots
+  - Logs
+  - Screenshots
 
 Synthetic or anonymized data only.
 
 ---
 
-## Licensing
+## Licensing & Contributor License Agreement (CLA)
 
-UHR is licensed under **GNU Affero General Public License v3.0 (AGPL-3.0)**.
+UHR is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**.
 
-By contributing:
+Before a pull request can be merged, contributors must sign the project's **Contributor License Agreement (CLA)**.
 
-- You agree that your contributions will be licensed under AGPL-3.0
-- You confirm you have the right to submit the code
-- You understand that deployed network use requires source availability
+The CLA:
 
-No Contributor License Agreement (CLA) is required at this time.
+- Allows the project to remain open-source under AGPL-3.0
+- Grants the Project Lead the right to sublicense or relicense contributions if necessary in the future
+- Guarantees permanent authorship credit
+
+You can review the full CLA here:
+👉 _[Link to your CLA Gist]_
+
+By submitting a contribution, you agree to both:
+
+- The AGPL-3.0 license
+- The terms of the Contributor License Agreement
 
 ---
 
@@ -123,17 +137,17 @@ Healthcare systems must be **boring, predictable, and correct**.
 
 Maintainers reserve the right to:
 
-- Reject or close issues or PRs
-- Request design changes
+- Reject or close issues or pull requests
+- Request architectural changes
 - Enforce project scope and principles
 
-This is not personal — it is necessary for healthcare infrastructure.
+This is not personal — it is necessary for healthcare infrastructure integrity.
 
 ---
 
 ## Final Note
 
-If you are unsure whether a contribution fits UHR, **ask first**.
+If you are unsure whether a contribution fits UHR, open an issue first.
 
 Good contributions improve trust, safety, and continuity of care.
 
