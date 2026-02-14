@@ -113,7 +113,7 @@ The CLA:
 - Guarantees permanent authorship credit
 
 You can review the full CLA here:
-👉 _[Link to your CLA Gist]_
+👉 https://gist.github.com/Aaqib-bashir1/60afa4d39a14a394e87e1a701d9e1942
 
 By submitting a contribution, you agree to both:
 
