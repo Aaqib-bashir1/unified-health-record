@@ -49,6 +49,8 @@ INSTALLED_APPS = [
     "corsheaders",
     'apps.users',
     'apps.patients',
+    'apps.integrations', 
+    'apps.claims',       
     'apps.medical_events',
     'apps.organizations',
     'apps.practitioners',
