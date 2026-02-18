@@ -103,34 +103,34 @@ def login_user(email: str, password: str):
 # Activation
 # =====================================================
 
-
-def activate_user(raw_token: str) -> bool:
-
+@transaction.atomic
+def activate_user(raw_token: str):
     token_hash = UserToken.hash_token(raw_token)
 
     try:
-        token = UserToken.objects.select_related("user").get(
-            token_hash=token_hash,
-            token_type=UserToken.TokenType.ACTIVATION,
+        token_obj = (
+            UserToken.objects.select_for_update()
+            .select_related("user")
+            .get(
+                token_hash=token_hash,
+                token_type=UserToken.TokenType.ACTIVATION,
+                is_used=False,
+                is_revoked=False,
+            )
         )
     except UserToken.DoesNotExist:
         raise ValidationError({"detail": "Invalid activation token."})
 
-    if not token.is_valid():
-        raise ValidationError({"detail": "Token expired or already used."})
+    if token_obj.expires_at <= timezone.now():
+        raise ValidationError({"detail": "Activation token expired."})
 
-    user = token.user
+    user = token_obj.user
+    if not user.is_active or not user.is_verified:
+        user.is_active = True
+        user.is_verified = True
+        user.save(update_fields=["is_active", "is_verified"])
 
-    with transaction.atomic():
-
-        if not user.is_active:
-            user.is_active = True
-            user.is_verified = True
-            user.save(update_fields=["is_active", "is_verified"])
-
-        token.mark_used()
-
-    return True
+    token_obj.mark_used()
 
 
 
@@ -189,31 +189,35 @@ def forgot_password(email: str) -> bool:
         user = User.objects.get(email=email)
     except User.DoesNotExist:
         return True  # prevent enumeration
+    now = timezone.now()
+    with transaction.atomic():
+        # Revoke all previous active reset tokens
+        UserToken.objects.select_for_update().filter(
+            user=user,
+            token_type=UserToken.TokenType.PASSWORD_RESET,
+            is_used=False,
+            is_revoked=False,
+            expires_at__gt=now,
+        ).update(
+            is_revoked=True,
+            revoked_at=now,
+        )
 
-    # Revoke all previous active reset tokens
-    UserToken.objects.filter(
-        user=user,
-        token_type=UserToken.TokenType.PASSWORD_RESET,
-        is_used=False,
-        is_revoked=False,
-        expires_at__gt=timezone.now(),
-    ).update(
-        is_revoked=True,
-        revoked_at=timezone.now(),
-    )
+        raw_token = UserToken.generate_secure_token()
 
-    raw_token = UserToken.generate_secure_token()
+        UserToken.objects.create(
+            user=user,
+            token_hash=UserToken.hash_token(raw_token),
+            token_type=UserToken.TokenType.PASSWORD_RESET,
+            expires_at=UserToken.default_expiry(hours=1),
+        )
 
-    UserToken.objects.create(
-        user=user,
-        token_hash=UserToken.hash_token(raw_token),
-        token_type=UserToken.TokenType.PASSWORD_RESET,
-        expires_at=UserToken.default_expiry(hours=1),
-    )
-
-    reset_link = f"{settings.FRONTEND_URL}/reset-password?token={raw_token}"
-
-    send_password_reset_email(user, reset_link)
+        transaction.on_commit(
+            lambda: send_password_reset_email(
+                user,
+                f"{settings.FRONTEND_URL}/reset-password?token={raw_token}",
+            )
+        )
 
     return True
 
@@ -223,39 +227,37 @@ def forgot_password(email: str) -> bool:
 
 
 def reset_password(raw_token: str, new_password: str):
-
     token_hash = UserToken.hash_token(raw_token)
 
-    try:
-        token = UserToken.objects.select_related("user").get(
-            token_hash=token_hash,
-            token_type=UserToken.TokenType.PASSWORD_RESET,
-        )
-    except UserToken.DoesNotExist:
-        raise ValidationError({"detail": "Invalid reset token."})
+    with transaction.atomic():
+        try:
+            token = UserToken.objects.select_for_update().select_related("user").get(
+                token_hash=token_hash,
+                token_type=UserToken.TokenType.PASSWORD_RESET,
+            )
+        except UserToken.DoesNotExist:
+            raise ValidationError({"detail": "Invalid reset token."})
 
-    if not token.is_valid():
-        raise ValidationError({"detail": "Token expired or already used."})
+        if not token.is_valid():
+            raise ValidationError({"detail": "Token expired or already used."})
 
-    user = token.user
+        user = token.user
 
-    # Validate password properly
-    try:
-        validate_password(new_password, user)
-    except ValidationError as e:
-        raise ValidationError({"password": e.messages})
+        # Validate password properly
+        try:
+            validate_password(new_password, user)
+        except ValidationError as e:
+            raise ValidationError({"password": e.messages})
 
-    # Update password
-    user.set_password(new_password)
-    user.save(update_fields=["password"])
+        # Update password
+        user.set_password(new_password)
+        user.save(update_fields=["password"])
 
-    # Mark token as used
-    token.is_used = True
-    token.used_at = timezone.now()
-    token.save(update_fields=["is_used", "used_at"])
+        # Mark token as used
+        token.mark_used()
 
-    # Blacklist all refresh tokens
-    for outstanding in OutstandingToken.objects.filter(user=user):
-        BlacklistedToken.objects.get_or_create(token=outstanding)
+        # Blacklist all refresh tokens
+        for outstanding in OutstandingToken.objects.filter(user=user):
+            BlacklistedToken.objects.get_or_create(token=outstanding)
 
     return True

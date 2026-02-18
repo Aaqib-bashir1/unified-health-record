@@ -1,5 +1,4 @@
 from django.conf import settings
-from core.utils.tokens import generate_signed_token
 from core.utils.email import send_email
 
 

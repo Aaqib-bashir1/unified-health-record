@@ -27,6 +27,7 @@ from .services import (
 )
 
 from .exceptions import AuthenticationError
+from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 
 logger = logging.getLogger(__name__)
 router = Router(tags=["Users"])
@@ -103,6 +104,8 @@ def login(request, body: LoginSchema):
 # Refresh
 # =========================
 
+
+
 @router.post(
     "/refresh",
     response={
@@ -111,23 +114,21 @@ def login(request, body: LoginSchema):
     },
 )
 def refresh_token(request, body: RefreshSchema):
-    from rest_framework_simplejwt.tokens import RefreshToken
-    from rest_framework_simplejwt.exceptions import TokenError
+    serializer = TokenRefreshSerializer(data={"refresh": body.refresh})
 
     try:
-        refresh = RefreshToken(body.refresh)
-        return HTTPStatus.OK, {
-            "access": str(refresh.access_token),
-            "refresh": str(refresh),
-            "token_type": "Bearer",
-        }
-
-    except TokenError:
+        serializer.is_valid(raise_exception=True)
+    except Exception:
         return error_response(
             HTTPStatus.BAD_REQUEST,
             "Invalid or expired refresh token.",
         )
 
+    return HTTPStatus.OK, {
+        "access": serializer.validated_data["access"],
+        "refresh": serializer.validated_data.get("refresh", body.refresh),
+        "token_type": "Bearer",
+    }
 
 # =========================
 # Activate
@@ -135,40 +136,70 @@ def refresh_token(request, body: RefreshSchema):
 
 @router.post(
     "/activate",
-    response={HTTPStatus.OK: dict, HTTPStatus.BAD_REQUEST: ErrorSchema},
+    response={HTTPStatus.OK: dict, HTTPStatus.
+              BAD_REQUEST: ErrorSchema,
+              HTTPStatus.INTERNAL_SERVER_ERROR: ErrorSchema},
+
 )
 def activate(request, body: ActivationSchema):
     try:
         activate_user(body.token)
         return HTTPStatus.OK, {"detail": "Account activated successfully."}
-
     except ValidationError as e:
         return error_response(HTTPStatus.BAD_REQUEST, str(e))
+    except Exception:
+        logger.exception("Unexpected activation error")
+        return error_response(
+            HTTPStatus.INTERNAL_SERVER_ERROR,
+            "Internal server error.",
+        )
 
 
 # =========================
 # Resend Activation
 # =========================
 
-@router.post("/resend-activation", response={HTTPStatus.OK: dict})
+@router.post(
+        "/resend-activation", 
+        response={
+            HTTPStatus.OK: dict,
+            HTTPStatus.BAD_REQUEST: ErrorSchema,
+            HTTPStatus.INTERNAL_SERVER_ERROR: ErrorSchema,
+        })
 def resend_activation(request, body: ResendActivationSchema):
-    resend_activation_email(body.email)
-    return HTTPStatus.OK, {
-        "detail": "If the account exists, activation email has been sent."
-    }
+    try:
+        resend_activation_email(body.email)
+        return HTTPStatus.OK, {
+            "detail": "If the account exists, activation email has been sent."
+        }
+    except ValidationError as e:
+        return error_response(HTTPStatus.BAD_REQUEST, str(e))
+    except Exception:
+        logger.exception("Unexpected resend activation error")
+        return error_response(
+            HTTPStatus.INTERNAL_SERVER_ERROR,
+            "Internal server error.",
+        )
 
 
 # =========================
 # Forgot Password
 # =========================
 
-@router.post("/forgot-password", response={HTTPStatus.OK: dict})
+@router.post("/forgot-password", 
+             response={
+                 HTTPStatus.OK: dict,
+                HTTPStatus.BAD_REQUEST: ErrorSchema,
+                HTTPStatus.INTERNAL_SERVER_ERROR: ErrorSchema,},
+)
 def forgot_password_view(request, body: ForgotPasswordSchema):
-    forgot_password(body.email)
-    return HTTPStatus.OK, {
-        "detail": "If the account exists, a password reset link has been sent."
-    }
-
+    try:
+        forgot_password(body.email)
+        return HTTPStatus.OK, {
+            "detail": "If the account exists, a password reset link has been sent."
+        }
+    except ValidationError as e:
+        return error_response(HTTPStatus.BAD_REQUEST, str(e))
 
 # =========================
 # Reset Password
@@ -176,7 +207,10 @@ def forgot_password_view(request, body: ForgotPasswordSchema):
 
 @router.post(
     "/reset-password",
-    response={HTTPStatus.OK: dict, HTTPStatus.BAD_REQUEST: ErrorSchema},
+    response={
+        HTTPStatus.OK: dict,
+        HTTPStatus.BAD_REQUEST: ErrorSchema,
+        HTTPStatus.INTERNAL_SERVER_ERROR: ErrorSchema,},
 )
 def reset_password_view(request, body: ResetPasswordSchema):
     try:
@@ -185,3 +219,9 @@ def reset_password_view(request, body: ResetPasswordSchema):
 
     except ValidationError as e:
         return error_response(HTTPStatus.BAD_REQUEST, str(e))
+    except Exception:
+        logger.exception("Unexpected reset password error")
+        return error_response(
+            HTTPStatus.INTERNAL_SERVER_ERROR,
+            "Internal server error.",
+        )

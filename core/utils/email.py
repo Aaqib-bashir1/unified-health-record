@@ -1,8 +1,12 @@
+import logging
 from django.core.mail import send_mail, EmailMultiAlternatives
 from django.conf import settings
-import logging
 
 logger = logging.getLogger(__name__)
+
+def mask_email(email):
+    name, domain = email.split("@")
+    return name[0] + "***@" + domain
 
 
 def send_email(
@@ -49,11 +53,11 @@ def send_email(
                 fail_silently=fail_silently,
             )
         
-        logger.info(f"Email sent successfully to {recipient_list}")
+        logger.info(f"Email sent to {[mask_email(e) for e in recipient_list]}")
         return result
         
     except Exception as e:
-        logger.error(f"Failed to send email to {recipient_list}: {str(e)}")
+        logger.error(f"Failed to send email to {[mask_email(e) for e in recipient_list]}: {str(e)}")
         if not fail_silently:
             raise
         return 0

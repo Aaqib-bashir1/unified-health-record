@@ -39,10 +39,7 @@ class RegistrationSchema(Schema):
     def trim_email(cls, v):
         return v.strip().lower()  # lowercase too for consistency
     
-    @field_validator("password", "confirm_password", mode="before")
-    @classmethod
-    def strip_passwords(cls, v):
-        return v.strip()
+
     
     @field_validator("password")
     @classmethod
@@ -78,11 +75,6 @@ class LoginSchema(Schema):
     @classmethod
     def trim_email(cls, v):
         return v.strip().lower()
-
-    @field_validator("password", mode="before")
-    @classmethod
-    def strip_password(cls, v):
-        return v.strip()
 
 
 class ActivationSchema(Schema):
