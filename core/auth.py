@@ -40,7 +40,7 @@ class JwtBrearer(HttpBearer):
     On failure:
       Raises HttpError(401)
     """
-    def authenticate(self,request,token:str ) ->User:
+    def authenticate(self,request,token:str ) -> User:
         try:
             Validated_token = jwt_auth.get.validated_token(token)
             user = jwt_auth.get_user(Validated_token)

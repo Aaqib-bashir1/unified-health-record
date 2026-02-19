@@ -210,7 +210,7 @@ class Patient(models.Model):
             # Enforced at DB level so no code path — service layer, admin,
             # raw queryset update, or migration — can leave an inconsistent row.
             models.CheckConstraint(
-                check=(
+                condition=(
                     models.Q(is_deceased=False)
                     | models.Q(is_deceased=True, deceased_date__isnull=False)
                 ),
@@ -544,7 +544,7 @@ class PatientUserAccess(models.Model):
             # This prevents silent revocations (is_active=False with no timestamp)
             # which would be undetectable in audit queries.
             models.CheckConstraint(
-                check=(
+                condition=(
                     models.Q(is_active=True,  revoked_at__isnull=True)
                     | models.Q(is_active=False, revoked_at__isnull=False)
                 ),
