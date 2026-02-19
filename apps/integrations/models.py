@@ -350,7 +350,7 @@ class ExternalPatientIdentity(models.Model):
             # FHIR export: all active identities for a patient
             models.Index(
                 fields=["patient", "is_linked", "is_revoked"],
-                name="idx_ext_identity_patient_active",
+                name="idx_ext_pat_identity_active",
             ),
         ]
 
