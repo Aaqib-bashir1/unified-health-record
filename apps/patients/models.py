@@ -91,6 +91,7 @@ class TrustLevel(models.TextChoices):
     SUPPORT_VERIFIED  = "support_verified",  "Support Verified (Manual)"
     DELEGATE_GRANTED  = "delegate_granted",  "Delegate Granted (No independent verification)"
     SYSTEM            = "system",            "System (Auto-created, pre-claim)"
+    UNVERIFIED        = "unverified",        "Unverified (Self-asserted, no independent verification)"
 
 
 # ===========================================================================
@@ -204,6 +205,13 @@ class Patient(models.Model):
     class Meta:
         app_label = "patients"
         db_table  = "patients"
+        permissions = [
+            # Custom permission for patient profile merging.
+            # Granted to specific support/admin staff — not all is_staff users.
+            # Merge is irreversible and affects medical history: it requires
+            # explicit trust, not just general admin access.
+            ("merge_patient", "Can merge duplicate patient profiles"),
+        ]
         constraints = [
             # Deceased consistency:
             # If is_deceased=True, deceased_date must not be null.
@@ -595,3 +603,229 @@ class PatientUserAccess(models.Model):
     @property
     def can_read(self) -> bool:
         return self.is_active
+
+
+# ===========================================================================
+# CHOICES: ACCESS REQUEST
+# ===========================================================================
+
+class AccessRequestStatus(models.TextChoices):
+    """
+    Lifecycle states of an AccessRequest.
+
+    Transitions:
+      pending  → approved  (patient approves)
+      pending  → denied    (patient denies)
+      pending  → expired   (request_expires_at passed, patient never responded)
+      pending  → cancelled (requester withdraws before patient responds)
+      approved → revoked   (patient revokes after approving)
+    """
+    PENDING   = "pending",   "Pending (awaiting patient response)"
+    APPROVED  = "approved",  "Approved"
+    DENIED    = "denied",    "Denied"
+    EXPIRED   = "expired",   "Expired (patient did not respond)"
+    CANCELLED = "cancelled", "Cancelled (requester withdrew)"
+    REVOKED   = "revoked",   "Revoked (patient revoked after approval)"
+
+
+# ===========================================================================
+# MODEL: ACCESS REQUEST
+# ===========================================================================
+
+class AccessRequest(models.Model):
+    """
+    A request by any user (doctor, family member, caregiver) to access
+    a patient's medical timeline.
+
+    Design rules:
+      - Same flow for all requester types — role determines permissions
+      - primary and full_delegate cannot be requested — only caregiver and viewer
+      - Request itself expires if patient doesn't respond within request_expires_at
+      - Approved access can be time-bound (access_expires_at) or permanent
+      - Approved access can be revoked by the patient at any time
+      - All records are permanent — no hard deletes
+      - When approved, a PatientUserAccess record is created with optional expiry
+
+    FHIR: No direct mapping. UHR-native consent request construct.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    patient = models.ForeignKey(
+        "patients.Patient",
+        on_delete=models.PROTECT,
+        related_name="access_requests",
+    )
+
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="sent_access_requests",
+    )
+
+    # ── Requested access ──────────────────────────────────────────────────────
+    # primary and full_delegate are never requestable.
+    # Validated at schema level and service level.
+    requested_role = models.CharField(
+        max_length=20,
+        choices=[
+            (AccessRole.CAREGIVER, AccessRole.CAREGIVER.label),
+            (AccessRole.VIEWER,    AccessRole.VIEWER.label),
+        ],
+    )
+
+    reason = models.TextField(
+        help_text="Why this user needs access. Shown to the patient."
+    )
+
+    # ── Lifecycle ─────────────────────────────────────────────────────────────
+    status = models.CharField(
+        max_length=20,
+        choices=AccessRequestStatus.choices,
+        default=AccessRequestStatus.PENDING,
+    )
+
+    # ── Duration ──────────────────────────────────────────────────────────────
+    # is_permanent=True  → PatientUserAccess has no expiry
+    # is_permanent=False → access_expires_at is set at approval time
+    is_permanent = models.BooleanField(
+        default=False,
+        help_text=(
+            "If True, approved access has no expiry. "
+            "If False, access_duration_days determines expiry."
+        ),
+    )
+    access_duration_days = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text=(
+            "How many days access should last after approval. "
+            "Null if is_permanent=True."
+        ),
+    )
+    access_expires_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Set at approval time. Null for permanent access.",
+    )
+
+    # ── Request expiry ────────────────────────────────────────────────────────
+    # The request itself expires if the patient doesn't respond.
+    # Default: 7 days from creation. After this, status → expired.
+    request_expires_at = models.DateTimeField(
+        help_text="When this request expires if the patient does not respond.",
+    )
+
+    # ── Response ──────────────────────────────────────────────────────────────
+    responded_at = models.DateTimeField(null=True, blank=True)
+    responded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="responded_access_requests",
+        help_text="The user who approved or denied this request (usually the patient).",
+    )
+    denial_reason = models.TextField(
+        null=True,
+        blank=True,
+        help_text="Optional reason shown to requester on denial.",
+    )
+
+    # ── Revocation ────────────────────────────────────────────────────────────
+    # Populated when status transitions from approved → revoked
+    revoked_at     = models.DateTimeField(null=True, blank=True)
+    revoked_by     = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="revoked_access_requests",
+    )
+    revocation_reason = models.TextField(null=True, blank=True)
+
+    # ── Resulting access record ───────────────────────────────────────────────
+    # Populated when request is approved and PatientUserAccess is created.
+    # Allows direct lookup of the access record for revocation.
+    resulting_access = models.OneToOneField(
+        "patients.PatientUserAccess",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="source_request",
+        help_text="The PatientUserAccess record created when this request was approved.",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        app_label = "patients"
+        db_table  = "access_requests"
+        constraints = [
+            # A user can only have one PENDING request per patient at a time.
+            # They can request again after denial, expiry, or revocation.
+            models.UniqueConstraint(
+                fields=["patient", "requested_by"],
+                condition=models.Q(status="pending"),
+                name="uq_access_request_one_pending_per_user_patient",
+            ),
+            # Duration consistency:
+            # If not permanent, access_duration_days must be set.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(is_permanent=True)
+                    | models.Q(is_permanent=False, access_duration_days__isnull=False)
+                ),
+                name="chk_access_request_duration_consistency",
+            ),
+        ]
+        indexes = [
+            # Patient views all pending requests for their profile
+            models.Index(
+                fields=["patient", "status"],
+                name="idx_access_request_patient_status",
+            ),
+            # Requester views their own sent requests
+            models.Index(
+                fields=["requested_by", "status"],
+                name="idx_access_request_requester_status",
+            ),
+            # Expiry sweep (background task or on-read expiry check)
+            models.Index(
+                fields=["status", "request_expires_at"],
+                name="idx_access_request_expiry",
+            ),
+        ]
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return (
+            f"AccessRequest {self.id}: {self.requested_by_id} → "
+            f"Patient {self.patient_id} [{self.status}]"
+        )
+
+    @property
+    def is_pending(self) -> bool:
+        return self.status == AccessRequestStatus.PENDING
+
+    @property
+    def is_expired(self) -> bool:
+        from django.utils import timezone
+        return (
+            self.status == AccessRequestStatus.PENDING
+            and self.request_expires_at < timezone.now()
+        )
+
+    @property
+    def is_access_active(self) -> bool:
+        """
+        Whether the resulting access is currently active.
+        Checks both approval status and optional time-bound expiry.
+        """
+        from django.utils import timezone
+        if self.status != AccessRequestStatus.APPROVED:
+            return False
+        if self.access_expires_at and self.access_expires_at < timezone.now():
+            return False
+        return True

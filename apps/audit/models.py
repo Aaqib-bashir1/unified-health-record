@@ -68,6 +68,9 @@ class AuditAction(models.TextChoices):
     IDENTITY_LINKED   = "identity_linked",   "External Identity Linked"
     IDENTITY_UNLINKED = "identity_unlinked", "External Identity Unlinked"
 
+    # Admin operations
+    MERGE = "merge", "Patient Profiles Merged (Admin)"
+
 
 # ===========================================================================
 # MODEL: AUDIT LOG

@@ -1,0 +1,114 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block title %}
+Merge Patient Profile | {{ site_title|default:"Django site admin" }}
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">{% trans "Home" %}</a>
+  &rsaquo;
+  <a href="{% url 'admin:patients_patient_changelist' %}">Patients</a>
+  &rsaquo;
+  <a href="{% url 'admin:patients_patient_change' patient.pk %}">
+    {{ patient.full_name }}
+  </a>
+  &rsaquo; Merge
+</div>
+{% endblock %}
+
+{% block content %}
+
+<h1>Merge Patient Profile</h1>
+
+<div class="messagelist">
+  <div class="error">
+    <strong>⚠ CRITICAL: This action is irreversible.</strong><br><br>
+    The <strong>later-created</strong> profile will be permanently retracted.<br>
+    The <strong>earlier-created</strong> profile will survive as the canonical record.<br>
+    All medical events will be reassigned to the surviving profile.<br>
+    All active access records on the retracted profile will be revoked.<br><br>
+    <strong>This cannot be undone. Review carefully before confirming.</strong>
+  </div>
+</div>
+
+<h2>Selected Patient</h2>
+
+<table class="adminlist">
+  <tbody>
+    <tr>
+      <th>Name</th>
+      <td><strong>{{ patient.full_name }}</strong></td>
+    </tr>
+    <tr>
+      <th>MRN</th>
+      <td>{{ patient.mrn|default:"—" }}</td>
+    </tr>
+    <tr>
+      <th>Date of Birth</th>
+      <td>{{ patient.birth_date }}</td>
+    </tr>
+    <tr>
+      <th>Created</th>
+      <td>{{ patient.created_at|date:"Y-m-d H:i" }}</td>
+    </tr>
+    <tr>
+      <th>Claimed</th>
+      <td>{{ patient.is_claimed|yesno:"Yes,No" }}</td>
+    </tr>
+  </tbody>
+</table>
+
+{% if access_records %}
+<h3>Active access records</h3>
+<table class="adminlist">
+  <thead>
+    <tr>
+      <th>User</th>
+      <th>Role</th>
+      <th>Granted</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for access in access_records %}
+    <tr>
+      <td>{{ access.user.email }}</td>
+      <td>{{ access.role }}</td>
+      <td>{{ access.granted_at|date:"Y-m-d" }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p>No active access records.</p>
+{% endif %}
+
+<h2>Select the other patient to merge with</h2>
+
+<form method="post" style="margin-top:20px;">
+  {% csrf_token %}
+
+  {% if form.errors %}
+  <div class="messagelist">
+    <div class="error">
+      Please correct the errors below.
+      {{ form.errors }}
+    </div>
+  </div>
+  {% endif %}
+
+  {{ form.as_p }}
+
+  <div style="margin-top:20px;">
+    <input type="submit"
+           value="Confirm Merge"
+           class="default"
+           style="background:#c0392b;border-color:#c0392b;"
+           onclick="return confirm('Are you absolutely sure? This cannot be undone.');">
+
+    <a href="../" style="margin-left:20px;">Cancel</a>
+  </div>
+</form>
+
+{% endblock %}

@@ -12,21 +12,25 @@ Design goals:
 - Soft-deleted user protection
 - Future-ready for audit integration (token metadata)
 """
+
 from typing import Optional
+
 from ninja.security import HttpBearer
-from ninja.erros import HttpError
+from ninja.errors import HttpError
 
 from django.contrib.auth import get_user_model
 
 from rest_framework_simplejwt.authentication import JWTAuthentication
-from rest_framework_simplejet.exceptions import Invalid_Token, TokenError
+from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 
-user = get_user_model()
+
+User = get_user_model()
 
 # Instantiate once — reuse for all requests
 jwt_auth = JWTAuthentication()
 
-class JwtBrearer(HttpBearer):
+
+class JWTBearer(HttpBearer):
     """
     JWT Bearer authentication for all django-ninja endpoints.
 
@@ -40,40 +44,44 @@ class JwtBrearer(HttpBearer):
     On failure:
       Raises HttpError(401)
     """
-    def authenticate(self,request,token:str ) -> User:
+
+    def authenticate(self, request, token: str) -> Optional[User]:
         try:
-            Validated_token = jwt_auth.get.validated_token(token)
-            user = jwt_auth.get_user(Validated_token)
+            validated_token = jwt_auth.get_validated_token(token)
+            user = jwt_auth.get_user(validated_token)
 
-        except (Invalid_Token, TokenError):
+        except (InvalidToken, TokenError):
             raise HttpError(401, "Invalid or expired token")
+
         if not user:
-            raise HttpError(401,"User not found")
+            raise HttpError(401, "User not found")
+
         if not user.is_active:
-            raise HttpError(401,"User account is inactive")
-        # optional chekc for soft delete      
-        if hasattr(user, "is_deleted" ) and user.is_deleted:
-            raise HttpError(401,"User account is deleted")
-        
+            raise HttpError(401, "User account is inactive")
+
+        # Optional soft-delete check (if you have this field)
+        if hasattr(user, "is_deleted") and user.is_deleted:
+            raise HttpError(401, "User account is deleted")
+
         # Optional: attach token metadata for audit usage
-        request.jwt=Validated_token
-        request.user=user    # Explicit, even though Ninja sets request.auth
+        request.jwt = validated_token
+        request.user = user  # Explicit, even though Ninja sets request.auth
 
         return user
-         
-    def get_current_user(self,request) -> Optional[User]:
-        """
-        Safely return the authenticated user.
 
 
-        Ensures:
-        - JWTBearer was applied
-        - User exists
-        - Endpoint cannot accidentally proceed unauthenticated
-        """
-        user = getattr(request, "user",None)
+def get_current_user(request) -> User:
+    """
+    Safely return the authenticated user.
 
-        if not user:
-            raise HttpError(401, "Authentication required")
-        
-        return user
+    Ensures:
+      - JWTBearer was applied
+      - User exists
+      - Endpoint cannot accidentally proceed unauthenticated
+    """
+    user = getattr(request, "auth", None)
+
+    if not user:
+        raise HttpError(401, "Authentication required")
+
+    return user

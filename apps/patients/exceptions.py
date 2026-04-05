@@ -64,9 +64,56 @@ class DuplicateAccessError(PatientError):
         super().__init__(message, code="duplicate_access")
 
 
+class DuplicateProfileWarning(PatientError):
+    """
+    A patient profile with the same name and date of birth already exists
+    under this user's account.
+
+    This is a WARNING, not a hard block.
+    The caller may retry with force_create=True to override it.
+
+    Used to prevent accidental duplication (parent creates the same child
+    twice) while allowing legitimate cases (twins, same-name siblings).
+
+    HTTP mapping: 409 Conflict with body { "possible_duplicate": true }
+    Frontend should present a confirmation dialog before retrying.
+    """
+    def __init__(
+        self,
+        message: str = (
+            "A patient profile with the same name and date of birth already exists "
+            "under your account. Pass force_create=true if you intend to create "
+            "a separate profile."
+        ),
+    ):
+        super().__init__(message, code="duplicate_profile_warning")
+
+
 class PatientRetracted(PatientError):
     """
     The patient profile has been soft-deleted and cannot be accessed or modified.
     """
     def __init__(self, message: str = "This patient profile has been retracted."):
         super().__init__(message, code="patient_retracted")
+
+
+class AccessRequestNotFound(PatientError):
+    def __init__(self, message: str = "Access request not found."):
+        super().__init__(message, code="access_request_not_found")
+
+
+class AccessRequestNotPending(PatientError):
+    """Raised when trying to approve/deny a request that is no longer pending."""
+    def __init__(self, message: str = "This request is no longer pending."):
+        super().__init__(message, code="access_request_not_pending")
+
+
+class AccessRequestExpired(PatientError):
+    def __init__(self, message: str = "This access request has expired."):
+        super().__init__(message, code="access_request_expired")
+
+
+class DuplicatePendingRequest(PatientError):
+    """Raised when a user already has a pending request for this patient."""
+    def __init__(self, message: str = "You already have a pending access request for this patient."):
+        super().__init__(message, code="duplicate_pending_request")

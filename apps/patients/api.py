@@ -32,12 +32,17 @@ from uuid import UUID
 from django.core.exceptions import ValidationError
 from ninja import Router
 
-from users.schemas import ErrorSchema
+from apps.users.schemas import ErrorSchema
 from core.auth import JWTBearer, get_current_user
 
 from .exceptions import (
     AccessDenied,
+    AccessRequestExpired,
+    AccessRequestNotFound,
+    AccessRequestNotPending,
     DuplicateAccessError,
+    DuplicatePendingRequest,
+    DuplicateProfileWarning,
     OrphanProtectionError,
     PatientNotFound,
     PatientRetracted,
@@ -53,6 +58,11 @@ from .schemas import (
     RevokeAccessSchema,
     SelfExitSchema,
     UpdatePatientSchema,
+
+    AccessRequestCreateSchema,
+    AccessRequestResponseSchema,
+    DenyRequestSchema,
+    RevokeRequestSchema,
 )
 from . import services
 
@@ -151,6 +161,7 @@ def _build_access_holder(access) -> dict:
         201: PatientDetailSchema,
         400: ErrorSchema,
         401: ErrorSchema,
+        409: ErrorSchema,
     },
     summary="Create a patient profile",
     description=(
@@ -164,6 +175,10 @@ def create_patient(request, data: CreatePatientSchema):
     try:
         patient, access = services.create_patient(user, data)
         return 201, _build_patient_detail(patient, access)
+    except DuplicateProfileWarning as e:
+        # 409 Conflict — possible duplicate detected, not a hard block.
+        # Frontend should present a confirmation dialog, then retry with force_create=true.
+        return 409, ErrorSchema(detail=e.message, status_code=409, field="force_create")
     except ValidationError as e:
         detail = "; ".join(
             f"{k}: {', '.join(v)}" if isinstance(v, list) else f"{k}: {v}"
@@ -409,4 +424,219 @@ def revoke_access(request, patient_id: UUID, access_id: UUID, data: RevokeAccess
     except PatientNotFound:
         return 404, ErrorSchema(detail="Access record not found.", status_code=404)
     except (AccessDenied, OrphanProtectionError) as e:
+        return 403, ErrorSchema(detail=e.message, status_code=403)
+
+
+# ===========================================================================
+# ACCESS REQUEST ENDPOINTS
+# ===========================================================================
+
+def _build_access_request(req) -> dict:
+    return {
+        "id":                   req.id,
+        "patient_id":           req.patient_id,
+        "requested_by_id":      req.requested_by_id,
+        "requested_by_email":   req.requested_by.email,
+        "requested_role":       req.requested_role,
+        "reason":               req.reason,
+        "status":               req.status,
+        "is_permanent":         req.is_permanent,
+        "access_duration_days": req.access_duration_days,
+        "access_expires_at":    req.access_expires_at,
+        "request_expires_at":   req.request_expires_at,
+        "responded_at":         req.responded_at,
+        "denial_reason":        req.denial_reason,
+        "created_at":           req.created_at,
+    }
+
+
+@router.post(
+    "/{patient_id}/access-requests/",
+    auth=jwt_auth,
+    response={
+        201: AccessRequestResponseSchema,
+        400: ErrorSchema,
+        401: ErrorSchema,
+        404: ErrorSchema,
+        409: ErrorSchema,
+    },
+    summary="Request access to a patient's timeline",
+    description=(
+        "Any authenticated user can request access to a patient profile. "
+        "The patient must approve before access is granted. "
+        "Requested role must be 'caregiver' or 'viewer'. "
+        "Only one pending request per user per patient is allowed."
+    ),
+)
+def request_access(request, patient_id: UUID, data: AccessRequestCreateSchema):
+    user = get_current_user(request)
+    try:
+        req = services.request_access(user, patient_id, data)
+        return 201, _build_access_request(req)
+    except DuplicatePendingRequest as e:
+        return 409, ErrorSchema(detail=e.message, status_code=409)
+    except DuplicateAccessError as e:
+        return 409, ErrorSchema(detail=e.message, status_code=409)
+    except PatientNotFound:
+        return 404, ErrorSchema(detail="Patient not found.", status_code=404)
+    except ValidationError as e:
+        detail = "; ".join(
+            f"{k}: {v}" for k, v in
+            (e.message_dict if hasattr(e, "message_dict") else {"detail": str(e)}).items()
+        )
+        return 400, ErrorSchema(detail=detail, status_code=400)
+
+
+@router.get(
+    "/{patient_id}/access-requests/",
+    auth=jwt_auth,
+    response={
+        200: list[AccessRequestResponseSchema],
+        401: ErrorSchema,
+        403: ErrorSchema,
+        404: ErrorSchema,
+    },
+    summary="List access requests for a patient profile",
+    description=(
+        "Returns all access requests for this patient. "
+        "Only the primary holder or managing delegate can view requests. "
+        "Pass ?status=pending to filter by status."
+    ),
+)
+def list_access_requests(request, patient_id: UUID, status: str = None):
+    user = get_current_user(request)
+    try:
+        qs = services.list_access_requests(user, patient_id, status_filter=status)
+        return 200, [_build_access_request(r) for r in qs]
+    except PatientNotFound:
+        return 404, ErrorSchema(detail="Patient not found.", status_code=404)
+    except AccessDenied as e:
+        return 403, ErrorSchema(detail=e.message, status_code=403)
+
+
+@router.get(
+    "/access-requests/sent/",
+    auth=jwt_auth,
+    response={
+        200: list[AccessRequestResponseSchema],
+        401: ErrorSchema,
+    },
+    summary="List access requests sent by the current user",
+    description="Returns all requests the current user has sent, across all patients.",
+)
+def list_my_sent_requests(request):
+    user = get_current_user(request)
+    reqs = services.list_my_sent_requests(user)
+    return 200, [_build_access_request(r) for r in reqs]
+
+
+@router.post(
+    "/{patient_id}/access-requests/{request_id}/approve/",
+    auth=jwt_auth,
+    response={
+        200: AccessRequestResponseSchema,
+        400: ErrorSchema,
+        401: ErrorSchema,
+        403: ErrorSchema,
+        404: ErrorSchema,
+        409: ErrorSchema,
+    },
+    summary="Approve an access request",
+    description=(
+        "Approve a pending access request. Creates a PatientUserAccess record "
+        "with the requested role and optional expiry. "
+        "Only the primary holder or managing delegate can approve."
+    ),
+)
+def approve_access_request(request, patient_id: UUID, request_id: UUID):
+    user = get_current_user(request)
+    try:
+        req = services.approve_access_request(user, patient_id, request_id)
+        return 200, _build_access_request(req)
+    except AccessRequestNotFound:
+        return 404, ErrorSchema(detail="Access request not found.", status_code=404)
+    except AccessRequestExpired as e:
+        return 410, ErrorSchema(detail=e.message, status_code=410)
+    except AccessRequestNotPending as e:
+        return 409, ErrorSchema(detail=e.message, status_code=409)
+    except DuplicateAccessError as e:
+        return 409, ErrorSchema(detail=e.message, status_code=409)
+    except (AccessDenied, PatientNotFound) as e:
+        return 403, ErrorSchema(detail=e.message, status_code=403)
+
+
+@router.post(
+    "/{patient_id}/access-requests/{request_id}/deny/",
+    auth=jwt_auth,
+    response={
+        200: AccessRequestResponseSchema,
+        401: ErrorSchema,
+        403: ErrorSchema,
+        404: ErrorSchema,
+        409: ErrorSchema,
+    },
+    summary="Deny an access request",
+)
+def deny_access_request(request, patient_id: UUID, request_id: UUID, data: DenyRequestSchema):
+    user = get_current_user(request)
+    try:
+        req = services.deny_access_request(user, patient_id, request_id, data.reason)
+        return 200, _build_access_request(req)
+    except AccessRequestNotFound:
+        return 404, ErrorSchema(detail="Access request not found.", status_code=404)
+    except AccessRequestNotPending as e:
+        return 409, ErrorSchema(detail=e.message, status_code=409)
+    except (AccessDenied, PatientNotFound) as e:
+        return 403, ErrorSchema(detail=e.message, status_code=403)
+
+
+@router.delete(
+    "/{patient_id}/access-requests/{request_id}/",
+    auth=jwt_auth,
+    response={
+        200: AccessRequestResponseSchema,
+        401: ErrorSchema,
+        403: ErrorSchema,
+        404: ErrorSchema,
+        409: ErrorSchema,
+    },
+    summary="Cancel your own pending access request",
+)
+def cancel_access_request(request, patient_id: UUID, request_id: UUID):
+    user = get_current_user(request)
+    try:
+        req = services.cancel_access_request(user, patient_id, request_id)
+        return 200, _build_access_request(req)
+    except AccessRequestNotFound:
+        return 404, ErrorSchema(detail="Access request not found.", status_code=404)
+    except AccessRequestNotPending as e:
+        return 409, ErrorSchema(detail=e.message, status_code=409)
+
+
+@router.post(
+    "/{patient_id}/access-requests/{request_id}/revoke/",
+    auth=jwt_auth,
+    response={
+        200: AccessRequestResponseSchema,
+        400: ErrorSchema,
+        401: ErrorSchema,
+        403: ErrorSchema,
+        404: ErrorSchema,
+    },
+    summary="Revoke a previously approved access request",
+    description=(
+        "Patient revokes access that was approved via a request. "
+        "Closes both the request and the resulting PatientUserAccess record atomically."
+    ),
+)
+def revoke_approved_request(request, patient_id: UUID, request_id: UUID, data: RevokeRequestSchema):
+    user = get_current_user(request)
+    try:
+        req = services.revoke_approved_request(user, patient_id, request_id, data.reason)
+        return 200, _build_access_request(req)
+    except AccessRequestNotFound:
+        return 404, ErrorSchema(detail="No approved request found with this ID.", status_code=404)
+    except OrphanProtectionError as e:
+        return 403, ErrorSchema(detail=e.message, status_code=403)
+    except (AccessDenied, PatientNotFound) as e:
         return 403, ErrorSchema(detail=e.message, status_code=403)

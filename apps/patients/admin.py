@@ -17,9 +17,13 @@ Class order matters — filters must be defined before they are referenced
 in list_filter on the ModelAdmin classes.
 """
 
+import logging
+
 from django.contrib import admin
 from django.urls import reverse
-from django.utils.html import format_html
+from django.utils.html import format_html, mark_safe
+
+logger = logging.getLogger(__name__)
 
 from .models import AccessRole, Patient, PatientUserAccess
 
@@ -268,18 +272,53 @@ class PatientAdmin(admin.ModelAdmin):
     @admin.display(description="Status")
     def status_badge(self, obj):
         if obj.deleted_at:
-            return format_html(
-                '<span style="color:#c0392b;font-weight:bold;">⊘ Retracted</span>'
-            )
+            return mark_safe('<span style="color:#c0392b;font-weight:bold;">⊘ Retracted</span>')
         if obj.is_deceased:
-            return format_html('<span style="color:#7f8c8d;">† Deceased</span>')
-        return format_html('<span style="color:#27ae60;">● Active</span>')
+            return mark_safe('<span style="color:#7f8c8d;">† Deceased</span>')
+        return mark_safe('<span style="color:#27ae60;">● Active</span>')
 
     @admin.display(description="Access holders")
     def access_holder_count(self, obj):
         active = obj.user_accesses.filter(is_active=True).count()
         total  = obj.user_accesses.count()
         return f"{active} active / {total} total"
+
+    # ── Merge action and custom URL ───────────────────────────────────────────
+
+    actions = ["action_merge_patient"]
+
+    @admin.action(description="⚠️ Merge into another patient profile")
+    def action_merge_patient(self, request, queryset):
+        """
+        List action: redirect to the merge confirmation page.
+        Exactly one patient must be selected — merging is always one-to-one.
+        """
+        if queryset.count() != 1:
+            self.message_user(
+                request,
+                f"Select exactly one patient profile to merge. "
+                f"You selected {queryset.count()}.",
+                level=messages.ERROR,
+            )
+            return
+        selected = queryset.first()
+        return HttpResponseRedirect(
+            reverse("admin:patients_patient_merge", args=[selected.pk])
+        )
+
+    def get_urls(self):
+        """
+        Register the merge confirmation page URL.
+        Defined inside the class — no monkey-patching required.
+        """
+        custom_urls = [
+            path(
+                "<uuid:patient_id>/merge/",
+                self.admin_site.admin_view(PatientMergeView.as_view()),
+                name="patients_patient_merge",
+            ),
+        ]
+        return custom_urls + super().get_urls()
 
 
 # ===========================================================================
@@ -428,3 +467,157 @@ class PatientUserAccessAdmin(admin.ModelAdmin):
         short  = obj.revocation_reason[:50]
         suffix = "…" if len(obj.revocation_reason) > 50 else ""
         return f"{short}{suffix}"
+
+
+# ===========================================================================
+# MERGE ADMIN — URL, VIEW, FORM, AND ACTION
+# ===========================================================================
+# Wiring:
+#   PatientAdmin.get_urls()     → registers /admin/patients/patient/merge/
+#   PatientAdmin.merge_action   → list action that redirects to merge view
+#   MergeConfirmView            → handles GET (confirmation page) and POST (execute)
+#
+# Two-step flow:
+#   1. Admin selects ONE source patient from the list
+#   2. Clicks "Merge into another patient" action → redirected to confirmation page
+#   3. Confirmation page shows source info, provides target selector
+#   4. Admin reviews and submits → merge executes atomically
+#   5. Success → redirect back to patient list with success message
+# ===========================================================================
+
+from django import forms
+from django.contrib import messages
+from django.contrib.admin.views.decorators import staff_member_required
+from django.http import HttpResponseRedirect
+from django.shortcuts import get_object_or_404, render
+from django.urls import path
+from django.utils.decorators import method_decorator
+from django.views import View
+
+from . import services
+
+
+class MergePatientForm(forms.Form):
+    """
+    Form for the merge confirmation page.
+    Admin picks the second profile — service auto-determines source/target
+    by created_at (older = target/survives, newer = source/retracted).
+    """
+    other_patient = forms.ModelChoiceField(
+        queryset=Patient.objects.filter(deleted_at__isnull=True),
+        label="Merge with this patient",
+        help_text=(
+            "The earlier-created profile will be kept as the canonical record. "
+            "The later-created profile will be retracted. "
+            "All medical events will be reassigned to the surviving profile."
+        ),
+        widget=forms.Select(attrs={"style": "width: 400px;"}),
+    )
+
+    reason = forms.CharField(
+        label="Reason for merge",
+        min_length=20,
+        max_length=1000,
+        widget=forms.Textarea(attrs={"rows": 4, "style": "width: 400px;"}),
+        help_text=(
+            "Required. Explain why these profiles are duplicates. "
+            "Written permanently into the audit log and retraction reason."
+        ),
+    )
+
+    def __init__(self, *args, selected_patient=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if selected_patient:
+            self.fields["other_patient"].queryset = Patient.objects.filter(
+                deleted_at__isnull=True,
+            ).exclude(pk=selected_patient.pk)
+
+
+@method_decorator(staff_member_required, name="dispatch")
+class PatientMergeView(View):
+    """
+    Two-step merge confirmation view.
+
+    GET  → show selected patient + form to pick the other patient
+    POST → call merge_patients(), which auto-determines source/target by created_at
+
+    Permission: patients.merge_patient OR superuser.
+    Django superusers pass has_perm() automatically without explicit grant.
+    Template: patients/templates/admin/patients/patient/merge_confirm.html
+              Auto-discovered when APP_DIRS=True in settings.
+    """
+    template_name = "admin/patients/patient/merge_confirm.html"
+
+    def _check_permission(self, request):
+        if not request.user.has_perm("patients.merge_patient"):
+            messages.error(
+                request,
+                "You do not have permission to merge patient profiles. "
+                "A superuser can grant you the 'patients.merge_patient' permission."
+            )
+            return False
+        return True
+
+    def get(self, request, patient_id):
+        if not self._check_permission(request):
+            return HttpResponseRedirect("../")
+
+        patient = get_object_or_404(Patient, pk=patient_id, deleted_at__isnull=True)
+        form    = MergePatientForm(selected_patient=patient)
+
+        return render(request, self.template_name, {
+            "title":          f"Merge Patient: {patient.full_name}",
+            "patient":        patient,
+            "form":           form,
+            "access_records": patient.user_accesses.filter(is_active=True).select_related("user"),
+            "opts":           Patient._meta,
+            "has_permission": True,
+        })
+
+    def post(self, request, patient_id):
+        if not self._check_permission(request):
+            return HttpResponseRedirect("../")
+
+        patient = get_object_or_404(Patient, pk=patient_id, deleted_at__isnull=True)
+        form    = MergePatientForm(request.POST, selected_patient=patient)
+
+        if not form.is_valid():
+            return render(request, self.template_name, {
+                "title":          f"Merge Patient: {patient.full_name}",
+                "patient":        patient,
+                "form":           form,
+                "access_records": patient.user_accesses.filter(is_active=True).select_related("user"),
+                "opts":           Patient._meta,
+                "has_permission": True,
+            })
+
+        other  = form.cleaned_data["other_patient"]
+        reason = form.cleaned_data["reason"]
+
+        try:
+            surviving = services.merge_patients(
+                admin_user=request.user,
+                patient_a_id=patient.pk,
+                patient_b_id=other.pk,
+                reason=reason,
+            )
+            messages.success(
+                request,
+                f"Merge complete. The earlier-created profile '{surviving.full_name}' "
+                f"(MRN: {surviving.mrn}) is the surviving record. "
+                f"The later-created profile has been retracted."
+            )
+            return HttpResponseRedirect(
+                reverse("admin:patients_patient_change", args=[surviving.pk])
+            )
+
+        except PermissionError as e:
+            messages.error(request, str(e))
+        except Exception as e:
+            messages.error(request, f"Merge failed: {e}")
+            logger.exception(
+                "Admin merge failed. patient=%s other=%s admin=%s",
+                patient_id, other.pk, request.user.email,
+            )
+
+        return HttpResponseRedirect("../")

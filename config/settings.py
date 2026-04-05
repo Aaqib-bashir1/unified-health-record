@@ -220,3 +220,4 @@ LOGGING = {
         },
     },
 }
+SILENCED_SYSTEM_CHECKS = ["models.E034"]

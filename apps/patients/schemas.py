@@ -23,7 +23,7 @@ from .models import AccessRole, ClaimMethod, Gender, TrustLevel
 
 # ErrorSchema is defined once in users.schemas and reused across all apps.
 # Never redefine it — keeps error responses consistent across the entire API.
-from users.schemas import ErrorSchema
+from apps.users.schemas import ErrorSchema
 
 
 # ===========================================================================
@@ -62,6 +62,15 @@ class CreatePatientSchema(Schema):
     # True  → caller becomes full_delegate (e.g. parent creating child's profile)
     # False → caller becomes primary (creating their own profile)
     is_dependent: bool = False
+
+    # Duplicate override flag.
+    # The service performs a soft duplicate check (same name + DOB under same account).
+    # If a possible duplicate is detected, it raises DuplicateProfileWarning (409).
+    # The frontend should present a confirmation dialog.
+    # If the user confirms intent (e.g. creating a profile for a twin),
+    # resend the request with force_create=True to bypass the warning.
+    # force_create=True is logged explicitly so deliberate overrides are auditable.
+    force_create: bool = False
 
     # Only relevant when is_dependent=True and patient is a minor.
     # Set to the patient's 18th birthday.
@@ -365,3 +374,96 @@ class GrantAccessResponseSchema(Schema):
 
     class Config:
         from_attributes = True
+
+
+# ===========================================================================
+# ACCESS REQUEST SCHEMAS
+# ===========================================================================
+
+class AccessRequestCreateSchema(Schema):
+    """
+    Input for requesting access to a patient profile.
+    Same flow for doctors, family members, caregivers — role determines permissions.
+    """
+    requested_role: str = Field(
+        ...,
+        description="caregiver (read+write) or viewer (read-only).",
+    )
+    reason: str = Field(
+        ...,
+        min_length=10,
+        max_length=1000,
+        description="Why you need access. Shown to the patient.",
+    )
+    is_permanent: bool = Field(
+        default=False,
+        description="If True, access has no expiry. If False, access_duration_days required.",
+    )
+    access_duration_days: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=365,
+        description="How many days access should last. Required if is_permanent=False.",
+    )
+
+    @field_validator("requested_role")
+    @classmethod
+    def validate_role(cls, v: str) -> str:
+        from .models import AccessRole
+        allowed = {AccessRole.CAREGIVER, AccessRole.VIEWER}
+        if v not in allowed:
+            raise ValueError(
+                f"'{v}' cannot be requested. Allowed: caregiver, viewer."
+            )
+        return v
+
+    @model_validator(mode="after")
+    def validate_duration(self) -> "AccessRequestCreateSchema":
+        if not self.is_permanent and not self.access_duration_days:
+            raise ValueError(
+                "access_duration_days is required when is_permanent is False."
+            )
+        if self.is_permanent and self.access_duration_days:
+            raise ValueError(
+                "access_duration_days must not be set when is_permanent is True."
+            )
+        return self
+
+
+class AccessRequestResponseSchema(Schema):
+    """Response schema for a single access request."""
+    id:                   UUID
+    patient_id:           UUID
+    requested_by_id:      UUID
+    requested_by_email:   str
+    requested_role:       str
+    reason:               str
+    status:               str
+    is_permanent:         bool
+    access_duration_days: Optional[int]
+    access_expires_at:    Optional[datetime]
+    request_expires_at:   datetime
+    responded_at:         Optional[datetime]
+    denial_reason:        Optional[str]
+    created_at:           datetime
+
+    class Config:
+        from_attributes = True
+
+
+class DenyRequestSchema(Schema):
+    """Optional denial reason when patient denies a request."""
+    reason: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description="Optional reason shown to the requester.",
+    )
+
+
+class RevokeRequestSchema(Schema):
+    """Reason required when patient revokes a previously approved request."""
+    reason: str = Field(
+        ...,
+        min_length=5,
+        max_length=500,
+    )
