@@ -52,8 +52,10 @@ INSTALLED_APPS = [
     'apps.integrations', 
     'apps.claims',       
     'apps.medical_events',
-    'apps.organizations',
+    'apps.organisations',
     'apps.practitioners',
+    'apps.share',
+    'apps.visits',
     'rest_framework_simplejwt.token_blacklist'
 
     
