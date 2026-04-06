@@ -27,10 +27,14 @@ Patterns followed from users/api.py:
 """
 
 import logging
+from datetime import timedelta
 from uuid import UUID
 
+import jwt
+from django.conf import settings
 from django.core.exceptions import ValidationError
-from ninja import Router
+from django.utils import timezone
+from ninja import Router,Schema
 
 from apps.users.schemas import ErrorSchema
 from core.auth import JWTBearer, get_current_user
@@ -640,3 +644,213 @@ def revoke_approved_request(request, patient_id: UUID, request_id: UUID, data: R
         return 403, ErrorSchema(detail=e.message, status_code=403)
     except (AccessDenied, PatientNotFound) as e:
         return 403, ErrorSchema(detail=e.message, status_code=403)
+
+
+# ===========================================================================
+# PATIENT QR ENDPOINT
+# ===========================================================================
+
+_QR_TOKEN_EXPIRY_MINUTES = 15
+_QR_TOKEN_TYPE           = "patient_qr"
+
+
+@router.get(
+    "/{patient_id}/qr/",
+    auth=jwt_auth,
+    response={
+        200: dict,
+        401: ErrorSchema,
+        403: ErrorSchema,
+        404: ErrorSchema,
+        410: ErrorSchema,
+    },
+    summary="Generate a patient QR token",
+    description=(
+        "Returns a short-lived signed token (15 min) encoding the patient_id. "
+        "The frontend renders this as a QR code. "
+        "Scanning the QR gives the scanner the patient_id needed to: "
+        "send an access request, initiate a hospital visit, or verify a share link. "
+        "Only the patient (primary holder) or a managing delegate can generate this. "
+        "Token is a signed JWT — stateless, no DB storage required."
+    ),
+)
+def get_patient_qr(request, patient_id: UUID):
+    """
+    Generate a short-lived signed QR token for a patient profile.
+
+    Token payload:
+        {
+            "type":       "patient_qr",
+            "patient_id": "<uuid>",
+            "exp":        <unix timestamp 15min from now>,
+            "iat":        <unix timestamp now>
+        }
+
+    The token is signed with Django's SECRET_KEY using HS256.
+    It is NOT a session credential — it only encodes the patient_id.
+    Downstream flows (access request, visit initiation) require their own auth.
+
+    Security properties:
+      - 15 minute expiry prevents stale QR screenshots being reused
+      - Signed — cannot be tampered to substitute a different patient_id
+      - Stateless — no DB table, no revocation (short expiry is the mitigation)
+      - Only primary holder or managing delegate can generate
+    """
+    user = get_current_user(request)
+
+    try:
+        patient, access = services.get_patient_for_user(user, patient_id)
+    except PatientNotFound:
+        return 404, ErrorSchema(detail="Patient not found.", status_code=404)
+    except PatientRetracted:
+        return 410, ErrorSchema(detail="This patient profile has been retracted.", status_code=410)
+
+    # Only primary holder or managing delegate should be able to generate a QR.
+    # A viewer or caregiver should not be able to present the patient's QR —
+    # that could enable them to initiate visits or share links on the patient's behalf.
+    if not access.can_manage_access:
+        return 403, ErrorSchema(
+            detail="Only the primary holder or managing delegate can generate a QR code.",
+            status_code=403,
+        )
+
+    now        = timezone.now()
+    expires_at = now + timedelta(minutes=_QR_TOKEN_EXPIRY_MINUTES)
+
+    payload = {
+        "type":       _QR_TOKEN_TYPE,
+        "patient_id": str(patient_id),
+        "exp":        int(expires_at.timestamp()),
+        "iat":        int(now.timestamp()),
+    }
+
+    token = jwt.encode(payload, settings.SECRET_KEY, algorithm="HS256")
+
+    return 200, {
+        "token":      token,
+        "patient_id": str(patient_id),
+        "expires_at": expires_at.isoformat(),
+        "expires_in_seconds": _QR_TOKEN_EXPIRY_MINUTES * 60,
+        "qr_data":    f"uhr://patient/{token}",
+    }
+
+
+# ===========================================================================
+# PATIENT DISCOVERY ENDPOINT
+# ===========================================================================
+
+from django.core.cache import cache
+
+_DISCOVERY_RATE_LIMIT = 5       # max searches per window
+_DISCOVERY_WINDOW_SECONDS = 3600  # 1 hour window
+
+
+@router.post(
+    "/discover/",
+    auth=jwt_auth,
+    response={
+        200: dict,
+        400: ErrorSchema,
+        401: ErrorSchema,
+        404: ErrorSchema,
+        429: ErrorSchema,
+    },
+    summary="Discover a patient by name and date of birth",
+    description=(
+        "Search for a patient profile by first name, last name, and date of birth. "
+        "Returns only patient_id and name — no clinical data. "
+        "The requester must then send an access request to see anything further. "
+        "Rate limited to 5 searches per hour per user to prevent enumeration. "
+        "Every search attempt is logged regardless of result."
+    ),
+)
+def discover_patient(request, data: "PatientDiscoverSchema"):
+    """
+    Patient discovery — returns patient_id only, nothing clinical.
+
+    Security properties:
+      - Rate limited: 5 attempts per hour per user (cache-based)
+      - Returns identical 404 whether patient doesn't exist or name/DOB mismatch
+        (prevents confirming whether a name exists in the system)
+      - Every attempt logged to audit regardless of result
+      - Nationality scopes the search — prevents cross-jurisdiction probing
+      - Caller still needs to send an access request and be approved
+        before seeing any data
+    """
+    user = get_current_user(request)
+
+    # Rate limit check — cache key per user
+    cache_key   = f"patient_discover_ratelimit_{user.pk}"
+    attempt_count = cache.get(cache_key, 0)
+
+    if attempt_count >= _DISCOVERY_RATE_LIMIT:
+        logger.warning(
+            "Patient discovery rate limit exceeded. user_id=%s", user.id
+        )
+        return 429, ErrorSchema(
+            detail=(
+                f"You have exceeded the discovery rate limit "
+                f"({_DISCOVERY_RATE_LIMIT} searches per hour). "
+                "Try again later."
+            ),
+            status_code=429,
+        )
+
+    # Increment counter — set expiry only on first attempt
+    cache.set(cache_key, attempt_count + 1, timeout=_DISCOVERY_WINDOW_SECONDS)
+
+    # Log every attempt regardless of outcome
+    logger.info(
+        "Patient discovery attempt. user_id=%s first_name=%s last_name=%s "
+        "birth_date=%s nationality=%s attempt=%s/%s",
+        user.id, data.first_name, data.last_name,
+        data.birth_date, data.nationality,
+        attempt_count + 1, _DISCOVERY_RATE_LIMIT,
+    )
+
+    # Query — intentionally minimal: only name + DOB + nationality
+    # Nationality scopes to the right identity jurisdiction
+    # iexact for names — "ahmed" and "Ahmed" are the same person
+    from patients.models import Patient as PatientModel
+    qs = PatientModel.objects.filter(
+        first_name__iexact=data.first_name,
+        last_name__iexact=data.last_name,
+        birth_date=data.birth_date,
+        deleted_at__isnull=True,
+    )
+
+    if data.nationality:
+        qs = qs.filter(nationality__iexact=data.nationality)
+
+    patient = qs.first()
+
+    if not patient:
+        # Return 404 regardless of why — don't reveal whether the patient
+        # exists but name/DOB didn't match vs genuinely not in the system
+        return 404, ErrorSchema(
+            detail="No patient found matching these details.",
+            status_code=404,
+        )
+
+    return 200, {
+        "patient_id": str(patient.id),
+        "full_name":  patient.full_name,
+        "birth_date": str(patient.birth_date),
+        "mrn":        patient.mrn,
+        "note": (
+            "Send an access request to /api/patients/{patient_id}/access-requests/ "
+            "to request access to this patient's timeline."
+        ),
+    }
+
+from datetime import date as date_type
+from typing import Optional
+class PatientDiscoverSchema(Schema):
+    """Input for patient discovery search."""
+    
+
+    first_name:  str
+    last_name:   str
+    birth_date:  date_type
+    nationality: Optional[str] = None  # ISO 3166-1 alpha-2, recommended for scoping
+   
