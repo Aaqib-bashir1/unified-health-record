@@ -9,3 +9,4 @@ python-decouple>=3.8
 psycopg2-binary>=2.9
 django-cors-headers>=4.3.0
 pydantic[email]
+bcrypt>=4.0
