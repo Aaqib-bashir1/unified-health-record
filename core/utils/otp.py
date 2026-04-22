@@ -1,6 +1,6 @@
 import secrets
 import string
-from datetime import timedelta
+from datetime import datetime, timedelta
 from django.utils import timezone
 from typing import Tuple
 
@@ -16,7 +16,7 @@ def generate_numeric_otp(length: int = 6) -> str:
 def generate_otp_with_expiry(
     length: int = 6,
     validity_minutes: int = 10
-) -> Tuple[str, timezone.datetime]:
+) -> Tuple[str, datetime]:
 
     otp = generate_numeric_otp(length)
     expiry = timezone.now() + timedelta(minutes=validity_minutes)

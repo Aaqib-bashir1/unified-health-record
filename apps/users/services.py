@@ -172,7 +172,8 @@ def resend_activation_email(email: str) -> bool:
             expires_at=UserToken.default_expiry(hours=1),
         )
 
-    send_activation_email(user, raw_token)
+        transaction.on_commit(lambda: send_activation_email(user, raw_token))
+    # send_activation_email(user, raw_token)
 
     return True
 

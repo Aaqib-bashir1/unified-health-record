@@ -200,7 +200,9 @@ def forgot_password_view(request, body: ForgotPasswordSchema):
         }
     except ValidationError as e:
         return error_response(HTTPStatus.BAD_REQUEST, str(e))
-
+    except Exception:
+        logger.exception("Unexpected forgot password error")
+        return error_response(HTTPStatus.INTERNAL_SERVER_ERROR, "Internal server error.")
 # =========================
 # Reset Password
 # =========================

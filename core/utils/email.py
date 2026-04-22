@@ -57,7 +57,7 @@ def send_email(
         return result
         
     except Exception as e:
-        logger.error(f"Failed to send email to {[mask_email(e) for e in recipient_list]}: {str(e)}")
+        logger.error(f"Failed to send email to {[mask_email(addr) for addr in recipient_list]}: {str(e)}")
         if not fail_silently:
             raise
         return 0

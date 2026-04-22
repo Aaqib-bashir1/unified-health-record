@@ -84,5 +84,14 @@ class UserTokenAdmin(admin.ModelAdmin):
     list_display = ("user", "token_type", "expires_at", "created_at")
     list_filter = ("token_type", "expires_at", "created_at")
     search_fields = ("user__email",)
-    readonly_fields = ("id", "created_at")  
+    readonly_fields = ("id", "created_at")   # ← token_hash should also be readonly
+
+    # Missing — tokens must never be hard-deleted
+    def has_delete_permission(self, request, obj=None):
+        return False
+    
+    def get_actions(self, request):
+        actions = super().get_actions(request)
+        actions.pop("delete_selected", None)
+        return actions 
     

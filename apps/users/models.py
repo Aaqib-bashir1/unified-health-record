@@ -126,6 +126,9 @@ class UserToken(models.Model):
 
     used_at = models.DateTimeField(null=True, blank=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
+    
+    class Meta:
+        app_label = "users"   # prevents migration conflicts under apps/ directory
 
     # =========================
     # TOKEN GENERATION

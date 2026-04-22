@@ -9,4 +9,9 @@ python-decouple>=3.8
 psycopg2-binary>=2.9
 django-cors-headers>=4.3.0
 pydantic[email]
-bcrypt>=4.0
+bcrypt>=4.0    #← share/services.py: bcrypt.hashpw() for share link validator hashing
+boto3>=1.34    #← medical_events/storage.py: S3 document uploads
+PyJWT>=2.8     #← visits/api.py: jwt.encode() for org QR token signing
+celery>=5.3
+django-celery-results>=2.5
+redis>=5.0 
