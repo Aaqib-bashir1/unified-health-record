@@ -25,6 +25,14 @@ from apps.patients.exceptions import AccessDenied, PatientNotFound, PatientRetra
 from apps.patients.models import Patient
 from apps.patients.services import _get_active_access
 
+from .exceptions import (
+    InvalidOrgQRToken,
+    OrganisationNotFound,
+    VisitAlreadyActive,
+    VisitAlreadyEnded,
+    VisitNotFound,
+    PractitionerNotAtOrg,
+)
 from .models import PatientVisit, PatientVisitAccess
 
 logger = logging.getLogger(__name__)
@@ -55,17 +63,17 @@ def _verify_org_qr_token(token: str) -> UUID:
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
     except jwt.ExpiredSignatureError:
-        raise ValueError("Organisation QR code has expired. Ask reception to refresh it.")
+        raise InvalidOrgQRToken("Organisation QR code has expired. Ask reception to refresh it.")
     except jwt.InvalidTokenError:
-        raise ValueError("Invalid organisation QR code.")
+        raise InvalidOrgQRToken("Invalid organisation QR code.")
 
     if payload.get("type") != _ORG_QR_TOKEN_TYPE:
-        raise ValueError("Invalid QR code type.")
+        raise InvalidOrgQRToken("Invalid QR code type.")
 
     try:
         return UUID(payload["org_id"])
     except (KeyError, ValueError):
-        raise ValueError("Malformed organisation QR code.")
+        raise InvalidOrgQRToken("Malformed organisation QR code.")
 
 
 # ===========================================================================
@@ -90,9 +98,8 @@ def initiate_visit(user, patient_id: UUID, org_qr_token: str, data=None) -> Pati
     # Verify the org QR token
     try:
         org_id = _verify_org_qr_token(org_qr_token)
-    except ValueError as e:
-        from django.core.exceptions import ValidationError
-        raise ValidationError({"org_qr_token": str(e)})
+    except InvalidOrgQRToken as e:
+        raise e
 
     # Verify patient access — patient must have manage rights to initiate a visit
     # (they are presenting their own records to the org)
@@ -112,11 +119,9 @@ def initiate_visit(user, patient_id: UUID, org_qr_token: str, data=None) -> Pati
         Organisation = apps.get_model("integrations", "Organisation")
         organisation = Organisation.objects.get(pk=org_id, verified=True)
     except LookupError:
-        from django.core.exceptions import ValidationError
-        raise ValidationError({"org_qr_token": "integrations app not yet configured."})
+        raise OrganisationNotFound("integrations app not yet configured.")
     except Organisation.DoesNotExist:
-        from django.core.exceptions import ValidationError
-        raise ValidationError({"org_qr_token": "Organisation not found or not verified."})
+        raise OrganisationNotFound()
 
     # Prevent duplicate active visits at the same org
     existing = PatientVisit.objects.filter(
@@ -127,14 +132,11 @@ def initiate_visit(user, patient_id: UUID, org_qr_token: str, data=None) -> Pati
     ).first()
 
     if existing:
-        from django.core.exceptions import ValidationError
-        raise ValidationError({
-            "detail": (
-                f"You already have an active visit at this organisation "
-                f"(expires {existing.expires_at.strftime('%H:%M %Z')}). "
-                "End the existing visit first if you want to start a new one."
-            )
-        })
+        raise VisitAlreadyActive(
+            f"You already have an active visit at this organisation "
+            f"(expires {existing.expires_at.strftime('%H:%M %Z')}). "
+            "End the existing visit first."
+        )
 
     expiry_hours = _VISIT_DEFAULT_EXPIRY_HOURS
     if data and hasattr(data, "expiry_hours") and data.expiry_hours:
@@ -177,11 +179,10 @@ def end_visit(user, patient_id: UUID, visit_id: UUID) -> PatientVisit:
             patient_id=patient_id,
         )
     except PatientVisit.DoesNotExist:
-        raise PatientNotFound("Visit not found.")
+        raise VisitNotFound()
 
     if not visit.is_active:
-        from django.core.exceptions import ValidationError
-        raise ValidationError({"detail": "This visit has already ended."})
+        raise VisitAlreadyEnded()
 
     now = timezone.now()
     visit.is_active = False
@@ -250,10 +251,7 @@ def check_practitioner_visit_access(practitioner, patient_id: UUID) -> PatientVi
     ).first()
 
     if not visit:
-        raise AccessDenied(
-            "No active visit session found for this patient at your organisation. "
-            "The patient must initiate a visit by scanning your organisation's QR code."
-        )
+        raise PractitionerNotAtOrg()
 
     # Lazy create or update the visit access record
     _get_or_create_visit_access(visit, practitioner)
@@ -296,3 +294,221 @@ def _get_or_create_visit_access(
         )
 
     return access
+
+
+# ===========================================================================
+# VISIT SCOPE AND TIMELINE REQUEST SERVICES
+# ===========================================================================
+
+def get_visit_emergency_summary(practitioner, visit_id: UUID) -> dict:
+    """
+    Return the emergency summary (Tier 1) for a patient during a visit.
+    Auto-granted — no patient approval needed.
+    Available to all verified practitioners at the visiting org.
+
+    Contains:
+      - Blood group + basic demographics
+      - Active allergies (HIGH criticality first — critical for safe prescribing)
+      - Active medications
+      - Most recent vital signs
+      - Active conditions
+      - Pending test orders
+
+    Maps to FHIR IPS (International Patient Summary).
+    Always available at verified organisations for patient safety.
+    """
+    visit = PatientVisit.objects.select_related(
+        "patient", "organisation"
+    ).get(pk=visit_id)
+
+    # Verify practitioner belongs to the visiting org
+    check_practitioner_visit_access(practitioner, visit.patient_id)
+
+    patient = visit.patient
+
+    # Import stats from medical_events — lazy import to avoid circular
+    from medical_events.stats import (
+        get_allergy_summary,
+        get_medication_history,
+        get_recent_vitals,
+        get_conditions_summary,
+        get_pending_orders,
+    )
+
+    allergies   = get_allergy_summary(patient.id)
+    medications = get_medication_history(patient.id)
+    vitals      = get_recent_vitals(patient.id, limit=1)
+    conditions  = get_conditions_summary(patient.id)
+    orders      = get_pending_orders(patient.id)
+
+    return {
+        "access_scope":   "emergency_summary",
+        "visit_id":       str(visit_id),
+        "organisation":   visit.organisation.name,
+        "patient": {
+            "id":          str(patient.id),
+            "full_name":   patient.full_name,
+            "birth_date":  str(patient.birth_date),
+            "gender":      patient.gender,
+            "blood_group": patient.blood_group,
+            "mrn":         patient.mrn,
+        },
+        "allergies":            allergies,
+        "active_medications":   medications["active"],
+        "latest_vitals":        vitals[0] if vitals else None,
+        "active_conditions":    conditions["active"],
+        "pending_orders":       orders,
+        "note": (
+            "This is the emergency summary automatically available "
+            "to verified organisations. For full timeline access, "
+            "submit a VisitTimelineRequest and await patient approval."
+        ),
+    }
+
+
+def get_visit_full_timeline(practitioner, visit_id: UUID) -> dict:
+    """
+    Return the full timeline for a patient during a visit.
+    Requires PatientVisit.access_scope = full_timeline (patient-approved).
+
+    Raises FullTimelineNotApproved if patient has not yet approved.
+    """
+    from .exceptions import FullTimelineNotApproved
+    from .models import VisitAccessScope
+
+    visit = PatientVisit.objects.select_related("patient").get(pk=visit_id)
+
+    # Verify practitioner has visit access
+    check_practitioner_visit_access(practitioner, visit.patient_id)
+
+    if visit.access_scope != VisitAccessScope.FULL_TIMELINE:
+        raise FullTimelineNotApproved()
+
+    # Return full visible timeline via medical_events service
+    from medical_events.services import get_timeline
+    from medical_events.stats import get_doctor_dashboard
+
+    # Use a system-level read — practitioner has been verified above
+    # We pass the practitioner's user for audit purposes
+    dashboard = get_doctor_dashboard(visit.patient_id)
+    dashboard["access_scope"] = "full_timeline"
+    dashboard["visit_id"]     = str(visit_id)
+    dashboard["organisation"] = visit.organisation.name
+
+    return dashboard
+
+
+@transaction.atomic
+def request_full_timeline(practitioner, visit_id: UUID, reason: str):
+    """
+    Practitioner requests full timeline access for an active visit.
+    One pending request per visit allowed.
+    Patient must approve before access_scope upgrades to full_timeline.
+    """
+    from .exceptions import TimelineRequestAlreadyExists
+    from .models import VisitTimelineRequest, VisitTimelineRequestStatus, VisitAccessScope
+
+    visit = PatientVisit.objects.select_for_update().select_related(
+        "patient"
+    ).get(pk=visit_id)
+
+    # Verify practitioner has visit access
+    check_practitioner_visit_access(practitioner, visit.patient_id)
+
+    # Already has full access — no need to request
+    if visit.access_scope == VisitAccessScope.FULL_TIMELINE:
+        from django.core.exceptions import ValidationError
+        raise ValidationError({"detail": "Full timeline access is already active for this visit."})
+
+    # Check for existing pending request
+    if VisitTimelineRequest.objects.filter(
+        visit=visit,
+        status=VisitTimelineRequestStatus.PENDING,
+    ).exists():
+        raise TimelineRequestAlreadyExists()
+
+    req = VisitTimelineRequest.objects.create(
+        visit        = visit,
+        patient      = visit.patient,
+        requested_by = practitioner,
+        reason       = reason,
+    )
+
+    logger.info(
+        "Full timeline requested. visit_id=%s practitioner=%s patient=%s",
+        visit_id, practitioner.id, visit.patient_id,
+    )
+    return req
+
+
+@transaction.atomic
+def respond_to_timeline_request(user, patient_id: UUID, request_id: UUID, approve: bool, denial_reason: str = None):
+    """
+    Patient approves or denies a full timeline request.
+    If approved — PatientVisit.access_scope upgrades to full_timeline.
+    """
+    from .exceptions import TimelineRequestNotFound, TimelineRequestNotPending
+    from .models import VisitTimelineRequest, VisitTimelineRequestStatus, VisitAccessScope
+    from patients.services import _get_active_access
+    from patients.exceptions import AccessDenied
+
+    # Verify patient has manage access
+    access = _get_active_access(user, patient_id)
+    if not access.can_manage_access:
+        raise AccessDenied("Only the primary holder or delegate can respond to timeline requests.")
+
+    try:
+        req = VisitTimelineRequest.objects.select_for_update().select_related(
+            "visit"
+        ).get(id=request_id, patient_id=patient_id)
+    except VisitTimelineRequest.DoesNotExist:
+        raise TimelineRequestNotFound()
+
+    if req.status != VisitTimelineRequestStatus.PENDING:
+        raise TimelineRequestNotPending(f"This request is already {req.status}.")
+
+    now = timezone.now()
+
+    if approve:
+        # Upgrade visit scope
+        visit = PatientVisit.objects.select_for_update().get(pk=req.visit_id)
+        visit.access_scope = VisitAccessScope.FULL_TIMELINE
+        visit.save(update_fields=["access_scope", "updated_at"])
+
+        req.status       = VisitTimelineRequestStatus.APPROVED
+        req.responded_at = now
+        req.responded_by = user
+    else:
+        req.status        = VisitTimelineRequestStatus.DENIED
+        req.responded_at  = now
+        req.responded_by  = user
+        req.denial_reason = denial_reason
+
+    req.save(update_fields=[
+        "status", "responded_at", "responded_by", "denial_reason"
+    ])
+
+    logger.info(
+        "Timeline request %s. request_id=%s patient_id=%s by=%s",
+        "approved" if approve else "denied",
+        request_id, patient_id, user.id,
+    )
+    return req
+
+
+def list_pending_timeline_requests(user, patient_id: UUID):
+    """List all pending timeline requests for a patient to review."""
+    from patients.services import _get_active_access
+    from .models import VisitTimelineRequest, VisitTimelineRequestStatus
+
+    access = _get_active_access(user, patient_id)
+
+    return (
+        VisitTimelineRequest.objects
+        .filter(
+            patient_id = patient_id,
+            status     = VisitTimelineRequestStatus.PENDING,
+        )
+        .select_related("visit__organisation", "requested_by")
+        .order_by("-created_at")
+    )

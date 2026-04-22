@@ -56,6 +56,7 @@ INSTALLED_APPS = [
     'apps.practitioners',
     'apps.share',
     'apps.visits',
+    'apps.clinical',
     'rest_framework_simplejwt.token_blacklist'
 
     

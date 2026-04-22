@@ -62,7 +62,7 @@ from .schemas import (
     RevokeAccessSchema,
     SelfExitSchema,
     UpdatePatientSchema,
-
+    PatientDiscoverSchema,
     AccessRequestCreateSchema,
     AccessRequestResponseSchema,
     DenyRequestSchema,
@@ -842,15 +842,3 @@ def discover_patient(request, data: "PatientDiscoverSchema"):
             "to request access to this patient's timeline."
         ),
     }
-
-from datetime import date as date_type
-from typing import Optional
-class PatientDiscoverSchema(Schema):
-    """Input for patient discovery search."""
-    
-
-    first_name:  str
-    last_name:   str
-    birth_date:  date_type
-    nationality: Optional[str] = None  # ISO 3166-1 alpha-2, recommended for scoping
-   

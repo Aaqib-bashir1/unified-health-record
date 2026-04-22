@@ -26,6 +26,7 @@ from .models import AccessRole, ClaimMethod, Gender, TrustLevel
 from apps.users.schemas import ErrorSchema
 
 
+
 # ===========================================================================
 # PATIENT — INPUT SCHEMAS
 # ===========================================================================
@@ -467,3 +468,38 @@ class RevokeRequestSchema(Schema):
         min_length=5,
         max_length=500,
     )
+
+
+from datetime import date as date_type
+from typing import Optional
+from ninja import Schema
+from pydantic import field_validator, model_validator
+
+
+class PatientDiscoverSchema(Schema):
+    """Input for patient discovery search."""
+
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    birth_date: Optional[date_type] = None
+    nationality: Optional[str] = None
+    gender: Optional[str] = None
+
+    @field_validator("first_name", "last_name")
+    @classmethod
+    def normalize_names(cls, v):
+        return v.strip().lower() if v else v
+
+    @field_validator("nationality")
+    @classmethod
+    def validate_country(cls, v):
+        if v and len(v) != 2:
+            raise ValueError("Must be ISO alpha-2 country code")
+        return v.upper() if v else v
+
+    @model_validator(mode="after")
+    def validate_minimum_fields(self):
+        provided = [self.first_name, self.last_name, self.birth_date]
+        if sum(bool(v) for v in provided) < 2:
+            raise ValueError("At least 2 fields required for discovery")
+        return self

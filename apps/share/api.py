@@ -41,6 +41,31 @@ from .schemas import (
 logger    = logging.getLogger(__name__)
 jwt_auth  = JWTBearer()
 
+def _build_event_summary(event) -> str:
+    """Minimal summary for share link timeline — no sensitive detail."""
+    ext = event.typed_extension
+    if not ext:
+        return event.event_type
+    type_map = {
+        "visit":          lambda e: e.reason or "Visit",
+        "observation":    lambda e: f"{e.observation_name}: {e.value_quantity or e.value_string or ''} {e.value_unit or ''}".strip(),
+        "condition":      lambda e: e.condition_name,
+        "medication":     lambda e: f"{e.medication_name} ({e.dosage or '—'})",
+        "procedure":      lambda e: e.procedure_name,
+        "document":       lambda e: f"Document: {e.document_type}",
+        "second_opinion": lambda e: f"Second opinion by {e.doctor_name}",
+        "allergy":        lambda e: f"Allergy: {e.substance_name}",
+        "vaccination":    lambda e: f"Vaccination: {e.vaccine_name}",
+        "consultation":   lambda e: f"Consultation: {e.department}",
+        "vital_signs":    lambda e: "Vital signs recorded",
+    }
+    fn = type_map.get(event.event_type)
+    try:
+        return fn(ext) if fn else event.event_type
+    except Exception:
+        return event.event_type
+
+
 # Authenticated router — patient manages share links
 # Mounted at /api/patients/{patient_id}/share-links/ in config/api.py
 authenticated_router = Router(tags=["Share Links"])
@@ -250,23 +275,44 @@ def get_timeline(request, token: str, session_token: str):
             status_code=401,
         )
 
-    # medical_events not yet built — return patient summary for now
-    # When medical_events app is built, this will query MedicalEvent.objects
-    # .filter(patient=patient, visibility_status="visible").order_by("-clinical_timestamp")
+    from medical_events.services import get_timeline
+    from medical_events.models import VisibilityStatus
+
+    # Share link sessions get read-only access to visible events only.
+    # Hidden and pending_approval events are never exposed via share links
+    # regardless of what the patient has approved — share links are for
+    # external parties who should only see what the patient has made visible.
+    qs = get_timeline(
+        user        = link.created_by,  # use creator's access context
+        patient_id  = patient.id,
+        filters     = {
+            "include_hidden":  False,
+            "include_pending": False,
+        }
+    )
+
+    events = [
+        {
+            "id":                 str(e.id),
+            "event_type":         e.event_type,
+            "clinical_timestamp": e.clinical_timestamp.isoformat(),
+            "verification_level": e.verification_level,
+            "source_type":        e.source_type,
+            "summary":            _build_event_summary(e),
+        }
+        for e in qs
+    ]
+
     return 200, {
         "patient": {
-            "id":         str(patient.id),
-            "full_name":  patient.full_name,
-            "birth_date": str(patient.birth_date),
-            "gender":     patient.gender,
+            "id":          str(patient.id),
+            "full_name":   patient.full_name,
+            "birth_date":  str(patient.birth_date),
+            "gender":      patient.gender,
             "blood_group": patient.blood_group,
         },
-        "scope":       link.scope,
-        "events":      [],   # placeholder — medical_events app not yet built
-        "note": (
-            "Timeline events will be populated once the medical_events app is built. "
-            "The patient's basic profile is accessible now."
-        ),
+        "scope":  link.scope,
+        "events": events,
     }
 
 
@@ -311,21 +357,44 @@ def submit_second_opinion(
             status_code=401,
         )
 
-    # medical_events not yet built — placeholder response
-    # When medical_events app exists, this will create a MedicalEvent of
-    # type=second_opinion with visibility_status=pending_approval and
-    # source_type=patient (anonymous submission).
+    from medical_events.services import create_event
+    from medical_events.models import EventType, SourceType
+
+    source_context = {
+        "source_type":    SourceType.PATIENT,  # anonymous — no practitioner account
+        "via_share_link": True,                # triggers pending_approval
+    }
+
+    try:
+        event = create_event(
+            user           = link.created_by,   # use patient's own user as the actor
+            patient_id     = patient.id,
+            event_type     = EventType.SECOND_OPINION,
+            data           = data,
+            source_context = source_context,
+        )
+    except Exception as e:
+        logger.error(
+            "Failed to create second opinion event. link_id=%s error=%s",
+            link.id, str(e),
+        )
+        return 400, ErrorSchema(
+            detail="Failed to record second opinion. Please try again.",
+            status_code=400,
+        )
+
     logger.info(
         "Second opinion submitted via share link. "
-        "patient_id=%s link_id=%s doctor=%s",
-        patient.id, link.id, data.doctor_name,
+        "event_id=%s patient_id=%s link_id=%s doctor=%s",
+        event.id, patient.id, link.id, data.doctor_name,
     )
 
     return 201, {
-        "status":   "staged",
+        "event_id":          str(event.id),
+        "status":            "staged",
+        "visibility_status": "pending_approval",
         "message": (
             f"Second opinion from {data.doctor_name} has been submitted "
             "and is pending patient approval before appearing on the timeline."
         ),
-        "visibility_status": "pending_approval",
     }

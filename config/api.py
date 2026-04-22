@@ -5,6 +5,7 @@ from apps.share.api import authenticated_router as share_router, public_router a
 from apps.visits.api import patient_router as visits_patient_router, org_router as visits_org_router
 from apps.organisations.api import router as org_router
 from apps.practitioners.api import router as prac_router
+from apps.medical_events.api import router as medical_router
 
 
 api = NinjaAPI(
@@ -30,3 +31,7 @@ api.add_router("/organisations", visits_org_router)
 
 api.add_router("/organisations", org_router)
 api.add_router("/practitioners", prac_router)
+
+
+
+api.add_router("", medical_router)

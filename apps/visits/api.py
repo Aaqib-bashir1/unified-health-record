@@ -227,3 +227,190 @@ def _build_visit(visit) -> dict:
         "is_active":         visit.is_currently_active,
         "visit_reason":      visit.visit_reason,
     }
+
+
+# ===========================================================================
+# PRACTITIONER-FACING VISIT ENDPOINTS
+# ===========================================================================
+
+from .exceptions import (
+    FullTimelineNotApproved,
+    TimelineRequestAlreadyExists,
+    TimelineRequestNotFound,
+    TimelineRequestNotPending,
+)
+
+
+@org_router.get(
+    "/{visit_id}/patient-summary/",
+    auth=jwt_auth,
+    response={200: dict, 401: ErrorSchema, 403: ErrorSchema, 404: ErrorSchema},
+    summary="Get emergency summary for a patient (Tier 1 — auto-granted)",
+    description=(
+        "Returns the International Patient Summary for the visiting patient. "
+        "Auto-granted to all verified practitioners at the visiting organisation. "
+        "Contains: blood group, allergies (HIGH criticality first), "
+        "active medications, latest vitals, active conditions. "
+        "No patient approval required — available immediately on visit initiation."
+    ),
+)
+def get_patient_emergency_summary(request, visit_id: UUID):
+    user = get_current_user(request)
+    try:
+        from practitioners.models import Practitioner
+        practitioner = Practitioner.objects.get(user=user, is_verified=True)
+        from . import services
+        summary = services.get_visit_emergency_summary(practitioner, visit_id)
+        return 200, summary
+    except Practitioner.DoesNotExist:
+        return 403, ErrorSchema(
+            detail="Verified practitioner profile required.",
+            status_code=403,
+        )
+    except Exception as e:
+        if "DoesNotExist" in type(e).__name__:
+            return 404, ErrorSchema(detail="Visit not found.", status_code=404)
+        if "AccessDenied" in type(e).__name__ or "PractitionerNotAtOrg" in type(e).__name__:
+            return 403, ErrorSchema(detail=str(e), status_code=403)
+        raise
+
+
+@org_router.get(
+    "/{visit_id}/timeline/",
+    auth=jwt_auth,
+    response={200: dict, 401: ErrorSchema, 403: ErrorSchema, 404: ErrorSchema},
+    summary="Get full patient timeline (Tier 2 — requires patient approval)",
+    description=(
+        "Returns the patient's complete visible timeline. "
+        "Requires PatientVisit.access_scope = full_timeline, "
+        "which is set when the patient approves a VisitTimelineRequest. "
+        "Returns 403 with code=full_timeline_not_approved if not yet approved."
+    ),
+)
+def get_visit_full_timeline(request, visit_id: UUID):
+    user = get_current_user(request)
+    try:
+        from practitioners.models import Practitioner
+        practitioner = Practitioner.objects.get(user=user, is_verified=True)
+        from . import services
+        timeline = services.get_visit_full_timeline(practitioner, visit_id)
+        return 200, timeline
+    except FullTimelineNotApproved as e:
+        return 403, ErrorSchema(detail=e.message, status_code=403)
+    except Practitioner.DoesNotExist:
+        return 403, ErrorSchema(detail="Verified practitioner profile required.", status_code=403)
+    except Exception as e:
+        if "DoesNotExist" in type(e).__name__:
+            return 404, ErrorSchema(detail="Visit not found.", status_code=404)
+        raise
+
+
+@org_router.post(
+    "/{visit_id}/request-full-timeline/",
+    auth=jwt_auth,
+    response={201: dict, 400: ErrorSchema, 401: ErrorSchema, 403: ErrorSchema, 409: ErrorSchema},
+    summary="Request full timeline access from patient",
+    description=(
+        "Practitioner requests patient approval for full timeline access. "
+        "Patient receives notification and can approve or deny. "
+        "One pending request per visit allowed."
+    ),
+)
+def request_full_timeline(request, visit_id: UUID, reason: str):
+    user = get_current_user(request)
+    try:
+        from practitioners.models import Practitioner
+        from django.core.exceptions import ValidationError
+        practitioner = Practitioner.objects.get(user=user, is_verified=True)
+        from . import services
+        req = services.request_full_timeline(practitioner, visit_id, reason)
+        return 201, {
+            "id":             str(req.id),
+            "visit_id":       str(req.visit_id),
+            "status":         req.status,
+            "reason":         req.reason,
+            "requested_by":   req.requested_by.full_name,
+            "created_at":     req.created_at.isoformat(),
+        }
+    except TimelineRequestAlreadyExists as e:
+        return 409, ErrorSchema(detail=e.message, status_code=409)
+    except ValidationError as e:
+        return 400, ErrorSchema(detail=str(e), status_code=400)
+    except Practitioner.DoesNotExist:
+        return 403, ErrorSchema(detail="Verified practitioner profile required.", status_code=403)
+    except Exception as e:
+        if "AccessDenied" in type(e).__name__:
+            return 403, ErrorSchema(detail=str(e), status_code=403)
+        raise
+
+
+# Patient-facing: review and respond to timeline requests
+@patient_router.get(
+    "/timeline-requests/",
+    auth=jwt_auth,
+    response={200: list, 401: ErrorSchema, 403: ErrorSchema},
+    summary="List pending timeline requests from organisations",
+    description=(
+        "Returns pending requests from practitioners asking for full timeline access. "
+        "Patient approves or denies each request."
+    ),
+)
+def list_timeline_requests(request, patient_id: UUID):
+    user = get_current_user(request)
+    try:
+        from . import services
+        reqs = services.list_pending_timeline_requests(user, patient_id)
+        return 200, [
+            {
+                "id":              str(r.id),
+                "visit_id":        str(r.visit_id),
+                "organisation":    r.visit.organisation.name,
+                "practitioner":    r.requested_by.full_name,
+                "reason":          r.reason,
+                "status":          r.status,
+                "created_at":      r.created_at.isoformat(),
+            }
+            for r in reqs
+        ]
+    except Exception as e:
+        if "AccessDenied" in type(e).__name__:
+            return 403, ErrorSchema(detail=str(e), status_code=403)
+        raise
+
+
+@patient_router.post(
+    "/timeline-requests/{request_id}/respond/",
+    auth=jwt_auth,
+    response={200: dict, 400: ErrorSchema, 401: ErrorSchema, 403: ErrorSchema, 404: ErrorSchema, 409: ErrorSchema},
+    summary="Approve or deny a full timeline request",
+)
+def respond_to_timeline_request(
+    request,
+    patient_id: UUID,
+    request_id: UUID,
+    approve: bool,
+    denial_reason: str = None,
+):
+    user = get_current_user(request)
+    try:
+        from . import services
+        req = services.respond_to_timeline_request(
+            user, patient_id, request_id, approve, denial_reason
+        )
+        return 200, {
+            "id":     str(req.id),
+            "status": req.status,
+            "message": (
+                "Full timeline access granted to the visiting practitioner."
+                if approve else
+                "Request denied."
+            ),
+        }
+    except TimelineRequestNotFound as e:
+        return 404, ErrorSchema(detail=e.message, status_code=404)
+    except TimelineRequestNotPending as e:
+        return 409, ErrorSchema(detail=e.message, status_code=409)
+    except Exception as e:
+        if "AccessDenied" in type(e).__name__:
+            return 403, ErrorSchema(detail=str(e), status_code=403)
+        raise

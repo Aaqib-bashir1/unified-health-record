@@ -297,3 +297,4 @@ class OrganisationAdmin(admin.ModelAdmin):
             return f"{active} active"
         except Exception:
             return "—"
+        

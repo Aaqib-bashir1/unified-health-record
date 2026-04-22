@@ -38,3 +38,23 @@ class PractitionerNotAtOrg(VisitError):
     """Raised when a practitioner tries to access a patient outside their org."""
     def __init__(self, message: str = "No active visit session found for this patient at your organisation."):
         super().__init__(message, code="practitioner_not_at_org")
+
+
+class TimelineRequestNotFound(VisitError):
+    def __init__(self, message: str = "Timeline request not found."):
+        super().__init__(message, code="timeline_request_not_found")
+
+
+class TimelineRequestNotPending(VisitError):
+    def __init__(self, message: str = "This request is no longer pending."):
+        super().__init__(message, code="timeline_request_not_pending")
+
+
+class TimelineRequestAlreadyExists(VisitError):
+    def __init__(self, message: str = "A pending timeline request already exists for this visit."):
+        super().__init__(message, code="timeline_request_already_exists")
+
+
+class FullTimelineNotApproved(VisitError):
+    def __init__(self, message: str = "Full timeline access has not been approved for this visit."):
+        super().__init__(message, code="full_timeline_not_approved")
